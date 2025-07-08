@@ -80,15 +80,27 @@
     };
 
     // --- UTILITIES ---
+    /**
+     * @class DOMUtils
+     * @description Provides utility functions for DOM manipulation and querying.
+     */
     class DOMUtils {
         /**
          * Generates a highly specific and robust CSS selector for a given element.
-         * Prioritizes ID, then unique attributes, then class names, and finally falls back to nth-of-type.
-         * @param {Element} el The element to generate a selector for.
-         * @returns {string} A CSS selector string.
+         * Prioritizes ID, then unique attributes (if any were configured to be checked),
+         * then class names (excluding chameleon-specific or purely numeric ones),
+         * and finally falls back to nth-of-type for disambiguation.
+         * @param {Element} el The DOM element for which to generate a selector.
+         * @returns {string} A CSS selector string, or an empty string if the element is invalid.
+         * @example
+         * const myElement = document.getElementById('myButton');
+         * const selector = DOMUtils.getSelector(myElement); // Might return "#myButton"
          */
         static getSelector(el) {
-            if (!el || !(el instanceof Element)) return '';
+            if (!el || !(el instanceof Element)) {
+                console.warn('[DOMUtils.getSelector] Invalid element provided:', el);
+                return '';
+            }
 
             // 1. Prioritize ID if it's unique
             if (el.id) {
@@ -133,11 +145,21 @@
         }
 
         /**
-         * Creates a removable overlay for dynamically injected elements.
-         * @param {Element} targetElement The element to attach the overlay to.
-         * @param {function} removeCallback Function to call when the overlay is clicked.
+         * Creates a removable overlay for dynamically injected elements, allowing users to easily remove them.
+         * The overlay appears on hover and can be clicked to trigger a removal callback.
+         * @param {Element} targetElement The DOM element to which the overlay should be attached.
+         * @param {function} removeCallback The function to execute when the overlay is clicked (typically to remove the targetElement and the overlay itself).
+         * @returns {void}
+         * @example
+         * const newComponent = document.createElement('div');
+         * document.body.appendChild(newComponent);
+         * DOMUtils.createRemovableOverlay(newComponent, () => newComponent.remove());
          */
         static createRemovableOverlay(targetElement, removeCallback) {
+            if (!targetElement || !(targetElement instanceof Element) || typeof removeCallback !== 'function') {
+                console.warn('[DOMUtils.createRemovableOverlay] Invalid arguments provided.', {targetElement, removeCallback});
+                return;
+            }
             const overlay = document.createElement('div');
             overlay.className = `${CONFIG.ID_PREFIX}removable-overlay`;
             overlay.textContent = 'Click to Remove';
@@ -174,8 +196,27 @@
     }
 
     // --- MAIN CONTROLLER ---
+    /**
+     * @class ChameleonAIForge
+     * @description The main controller orchestrating all modules and functionalities of the Chameleon AI-Forge userscript.
+     * It initializes the UI, functional modules, agent core, and interactive tools. It also manages global state and event listeners.
+     */
     class ChameleonAIForge {
+        /**
+         * Initializes the ChameleonAIForge instance, setting up state, and instantiating all core components and modules.
+         */
         constructor() {
+            /**
+             * @property {object} state - Holds the global state of the application.
+             * @property {boolean} state.isInitialized - Whether the script has completed its main initialization.
+             * @property {boolean} state.isPanelOpen - Current visibility state of the main command panel.
+             * @property {string} state.activeTab - The ID of the currently active tab in the command panel.
+             * @property {boolean} state.isInspecting - Whether element inspection mode is active.
+             * @property {Element|null} state.selectedElement - The currently selected DOM element for analysis.
+             * @property {string} state.sessionId - A unique ID for the current user session.
+             * @property {boolean} state.featuresPaused - Whether features should be paused (e.g., due to tab inactivity).
+             * @property {Array<object>} state.registeredTools - List of tools registered by plugins.
+             */
             this.state = {
                 isInitialized: false,
                 isPanelOpen: GM_getValue('panelOpen', false),
@@ -212,6 +253,16 @@
             this.exposePluginAPI();
         }
 
+        /**
+         * Asynchronously initializes the Chameleon AI-Forge.
+         * This includes checking if it's in an iframe, preventing multiple initializations,
+         * adding global styles, initializing the NeuralStyleEngine and APIMonitor,
+         * waiting for the DOM to be ready, injecting UI, rendering modules,
+         * initializing functional modules and the AgentCore, setting up global listeners,
+         * and showing a welcome modal on the first run.
+         * @async
+         * @returns {Promise<void>} A promise that resolves when initialization is complete or skipped.
+         */
         async init() {
             // Prevent running in iframes to avoid conflicts and unnecessary resource usage
             if (this.isFrame() || this.state.isInitialized) {
@@ -259,7 +310,11 @@
             GM_registerMenuCommand('Open Command Palette (Ctrl+Shift+P)', () => this.palette.toggle());
         }
 
-        // Utility to wait for the DOM to be fully loaded
+        /**
+         * Utility function that returns a Promise which resolves when the DOM is ready.
+         * It checks `document.readyState` and uses `DOMContentLoaded` event listener as a fallback.
+         * @returns {Promise<void>} A promise that resolves when the DOM is interactive or complete.
+         */
         waitForDOMReady() {
             return new Promise(resolve => {
                 if (document.readyState === 'interactive' || document.readyState === 'complete') {
@@ -270,7 +325,12 @@
             });
         }
 
-        // Checks if the script is running inside an iframe
+        /**
+         * Checks if the script is currently running inside an iframe.
+         * This is important to prevent the userscript from running in embedded contexts
+         * where it might not be intended or could cause issues.
+         * @returns {boolean} True if the script is in an iframe, false otherwise.
+         */
         isFrame() {
             try {
                 // This is the most reliable way to check if it's the top window.
@@ -286,7 +346,11 @@
             }
         }
 
-        // Sets up global keyboard and visibility listeners
+        /**
+         * Sets up global event listeners for keyboard shortcuts (Command Palette, Escape key)
+         * and tab visibility changes (to pause/resume features).
+         * @private
+         */
         setupGlobalListeners() {
             document.addEventListener('keydown', (e) => {
                 // Ctrl+Shift+P for Command Palette
@@ -314,7 +378,11 @@
             });
         }
 
-        // Toggles the element inspection mode
+        /**
+         * Toggles the element inspection mode on or off.
+         * Updates UI accordingly and starts/stops the ElementHighlighter.
+         * @param {boolean} [forceState] - Optional. If true, enables inspection mode. If false, disables it. If undefined, toggles the current state.
+         */
         toggleInspectMode(forceState) {
             this.state.isInspecting = typeof forceState === 'boolean' ? forceState : !this.state.isInspecting;
             this.ui.updateInspectModeButton();
@@ -329,7 +397,12 @@
             }
         }
 
-        // Sets the currently selected element and triggers analysis
+        /**
+         * Sets the currently selected DOM element for analysis or manipulation.
+         * It updates the internal state, disables inspection mode, ensures the panel is visible,
+         * switches to the 'analyze' tab, and triggers element analysis.
+         * @param {Element} element - The DOM element that was selected.
+         */
         setSelectedElement(element) {
             this.state.selectedElement = element;
             this.log('Element selected:', element);
@@ -340,13 +413,28 @@
             this.agent.trackUserActivity('element_selected', { selector: DOMUtils.getSelector(element) });
         }
 
-        // Public API for plugins
+        /**
+         * Exposes a public API on `unsafeWindow.ChameleonAI` for plugins or external scripts to interact with the userscript.
+         * This includes methods for registering tools, getting the main controller, and accessing utility classes.
+         * @private
+         */
         exposePluginAPI() {
             if (typeof unsafeWindow.ChameleonAI === 'undefined') {
+                /**
+                 * @global ChameleonAI
+                 * @property {function} registerTool - Registers a new tool/plugin.
+                 * @property {function} getController - Provides access to the main ChameleonAIForge controller. Use with caution.
+                 * @property {object} DOMUtils - Utility class for DOM manipulations.
+                 */
                 unsafeWindow.ChameleonAI = {
                     registerTool: (tool) => this.registerTool(tool),
-                    getController: () => this, // Provide access to controller for advanced plugins
-                    DOMUtils: DOMUtils, // Expose utilities
+                    /**
+                     * Provides access to the main ChameleonAIForge controller instance.
+                     * @returns {ChameleonAIForge} The main controller instance.
+                     * @description Use with caution, as direct manipulation of the controller can affect core functionality.
+                     */
+                    getController: () => this,
+                    DOMUtils: DOMUtils,
                 };
                 this.log('ChameleonAI plugin API exposed.');
             }
@@ -361,6 +449,9 @@
          * @param {function(HTMLElement, ChameleonAIForge)} tool.renderFn - Function to render the tool's content into its tab. Receives the tab's DOM element and the controller.
          * @param {Array<object>} [tool.commands] - Array of commands to add to the Command Palette. Each { name, icon, action }.
          * @param {Array<object>} [tool.contextMenuItems] - Array of context menu items. Each { name, icon, action }.
+         * @description Plugins should use prefixed keys for GM_setValue (e.g., `plugin_myplugin_setting`) to avoid conflicts.
+         *              Use the controller instance (via `getController()`) responsibly.
+         *              Leverage existing CSS variables (e.g., `var(--chameleon-primary)`) for consistent styling.
          */
         registerTool(tool) {
             if (!tool.id || !tool.name || !tool.icon || typeof tool.renderFn !== 'function') {
@@ -384,7 +475,12 @@
             if (this.state.isInitialized) {
                 const tabContentEl = document.getElementById(`${CONFIG.ID_PREFIX}tab-${tool.id}`);
                 if (tabContentEl) {
-                    tool.renderFn(tabContentEl, this);
+                    try {
+                        tool.renderFn(tabContentEl, this);
+                    } catch (e) {
+                        this.error(`Error rendering plugin "${tool.name}" (id: ${tool.id}):`, e);
+                        tabContentEl.innerHTML = `<p class="chameleon-placeholder status-danger">Error loading plugin: ${e.message}</p>`;
+                    }
                 }
             }
             this.log(`Plugin "${tool.name}" registered successfully.`);
@@ -675,28 +771,55 @@ async function performWebTask(page, actions, report) {
             this.ui.updateStatus('Puppeteer script generated.', 'success', 3000);
         }
 
-        // Custom logging for debugging
+        /**
+         * Custom logging utility for debug messages.
+         * Prepends a styled "[CGF]" prefix to console logs. Only logs if `CONFIG.DEBUG` is true.
+         * @param {...any} args - Arguments to pass to `console.log`.
+         */
         log(...args) {
             if (CONFIG.DEBUG) console.log('%c[CGF]', 'color: var(--chameleon-accent); font-weight: bold;', ...args);
         }
+        /**
+         * Custom logging utility for error messages.
+         * Prepends a styled "[CGF]" prefix to console errors.
+         * @param {...any} args - Arguments to pass to `console.error`.
+         */
         error(...args) {
             console.error('%c[CGF]', 'color: var(--danger); font-weight: bold;', ...args);
         }
     }
 
     // --- UI MANAGER ---
-    // Handles all user interface creation, rendering, and interaction
+    /**
+     * @class UIManager
+     * @description Manages all aspects of the user interface, including creation, rendering,
+     * event binding, and state updates for the widget, panel, notifications, and modals.
+     * @param {ChameleonAIForge} controller - The main controller instance.
+     */
     class UIManager {
+        /**
+         * Initializes the UIManager.
+         * @param {ChameleonAIForge} controller - The main controller instance.
+         */
         constructor(controller) {
             this.controller = controller;
+            /** @property {object} elements - Cached references to key UI DOM elements. */
             this.elements = {};
+            /** @property {object} dragState - State object for drag operations. */
+            this.dragState = {};
+            /** @property {object} resizeState - State object for resize operations. */
             this.dragState = {};
             this.resizeState = {};
             this.notificationCounter = 0; // Unique ID for notifications
             this.removableOverlays = []; // Track active removable overlays
+            /** @private @property {number|null} statusTimeout - Timeout ID for clearing status messages. */
+            this.statusTimeout = null;
         }
 
-        // Injects the main UI components into the DOM
+        /**
+         * Injects the main UI components (widget, panel) into the DOM,
+         * binds their events, and updates their state based on saved preferences.
+         */
         inject() {
             this.createWidget();
             this.createPanel();
@@ -705,7 +828,10 @@ async function performWebTask(page, actions, report) {
             this.updatePanelState(); // Apply saved state (open/closed, position, size)
         }
 
-        // Creates the floating widget button
+        /**
+         * Creates the floating widget button and appends it to the body.
+         * @private
+         */
         createWidget() {
             const widget = document.createElement('div');
             widget.id = `${CONFIG.ID_PREFIX}widget`;
@@ -805,7 +931,14 @@ async function performWebTask(page, actions, report) {
             // Render plugin content if already initialized
             if (this.controller.state.isInitialized) {
                 const tool = this.controller.state.registeredTools.find(t => t.id === id);
-                if (tool) tool.renderFn(contentDiv, this.controller);
+                if (tool) {
+                    try {
+                        tool.renderFn(contentDiv, this.controller);
+                    } catch (e) {
+                        this.controller.error(`Error rendering plugin tab content for "${tool.name}" (id: ${id}):`, e);
+                        contentDiv.innerHTML = `<p class="chameleon-placeholder status-danger">Error loading plugin content: ${e.message}</p>`;
+                    }
+                }
             }
         }
 
@@ -1015,6 +1148,9 @@ async function performWebTask(page, actions, report) {
             if (!container) {
                 container = document.createElement('div');
                 container.id = `${CONFIG.ID_PREFIX}notification-container`;
+                // ARIA attributes for screen readers
+                container.setAttribute('aria-live', options.type === 'danger' || options.type === 'warning' ? 'assertive' : 'polite');
+                container.setAttribute('role', 'log'); // Use 'log' for a sequence of messages, or 'status'/'alert' for single ones.
                 document.body.appendChild(container);
             }
 
@@ -1269,21 +1405,29 @@ async function performWebTask(page, actions, report) {
             let generatedCss = '';
             let generatedJs = '';
             let componentName = 'Generated Component';
+            const lowerPrompt = prompt.toLowerCase();
 
-            if (prompt.toLowerCase().includes('login form')) {
+            if (lowerPrompt.includes('login form')) {
                 componentName = 'Login Form';
+                const includeRememberMe = lowerPrompt.includes('remember me');
                 generatedHtml = `
                     <div class="${CONFIG.ID_PREFIX}generated-component chameleon-card" style="max-width: 400px; margin: 20px auto; padding: 20px;">
                         <h4 style="text-align: center; margin-bottom: 20px;">Login</h4>
                         <form class="${CONFIG.ID_PREFIX}generated-form">
                             <div class="chameleon-form-group">
                                 <label for="gen-email">Email</label>
-                                <input type="email" id="gen-email" class="chameleon-input" placeholder="your@email.com">
+                                <input type="email" id="gen-email" class="chameleon-input" placeholder="your@email.com" aria-label="Email">
                             </div>
                             <div class="chameleon-form-group">
                                 <label for="gen-password">Password</label>
-                                <input type="password" id="gen-password" class="chameleon-input" placeholder="********">
+                                <input type="password" id="gen-password" class="chameleon-input" placeholder="********" aria-label="Password">
                             </div>
+                            ${includeRememberMe ? `
+                            <div class="chameleon-form-group" style="display: flex; align-items: center;">
+                                <input type="checkbox" id="gen-remember" style="width: auto; margin-right: 8px;">
+                                <label for="gen-remember" style="margin-bottom: 0; font-size: 14px; text-transform: none;">Remember me</label>
+                            </div>
+                            ` : ''}
                             <button type="submit" class="chameleon-button" style="width: 100%; margin-top: 10px;">Sign In</button>
                             <p style="text-align: center; margin-top: 15px; font-size: 12px;"><a href="#" style="color: var(--chameleon-primary);">Forgot Password?</a></p>
                         </form>
@@ -1292,11 +1436,13 @@ async function performWebTask(page, actions, report) {
                 generatedJs = `
                     document.querySelector('.${CONFIG.ID_PREFIX}generated-form').addEventListener('submit', function(e) {
                         e.preventDefault();
-                        alert('Login form submitted (simulated)!');
-                        console.log('Generated form submitted:', { email: document.getElementById('gen-email').value });
+                        const email = document.getElementById('gen-email').value;
+                        const rememberMe = document.getElementById('gen-remember') ? document.getElementById('gen-remember').checked : false;
+                        alert('Login form submitted (simulated)! Email: ' + email + (rememberMe ? ', Remember me: true' : ''));
+                        console.log('Generated form submitted:', { email: email, rememberMe: rememberMe });
                     });
                 `;
-            } else if (prompt.toLowerCase().includes('product card')) {
+            } else if (lowerPrompt.includes('product card')) {
                 componentName = 'Product Card';
                 generatedHtml = `
                     <div class="${CONFIG.ID_PREFIX}generated-component chameleon-card" style="width: 280px; margin: 20px; display: inline-block; vertical-align: top; text-align: center;">
@@ -1425,9 +1571,71 @@ async function performWebTask(page, actions, report) {
                 <div id="chameleon-analysis-results" class="chameleon-analysis-results">
                     <p class="chameleon-placeholder">Scan results will appear here. Or, use the ${ICONS.inspect} inspector to analyze a specific element.</p>
                 </div>
+                <div class="chameleon-card" style="margin-top: 20px;">
+                    <h4>${ICONS.bulb} Page Technology & Info</h4>
+                    <button id="chameleon-get-tech" class="chameleon-button secondary">${ICONS.inspect} Get Page Details</button>
+                    <div id="chameleon-tech-details" class="chameleon-code-block" style="margin-top:10px; display:none;"></div>
+                </div>
             `;
             container.querySelector('#chameleon-run-scan').addEventListener('click', () => this.runFullPageScan());
+            container.querySelector('#chameleon-get-tech').addEventListener('click', () => this.displayPageTechDetails());
         }
+
+        async displayPageTechDetails() {
+            const detailsContainer = document.getElementById('chameleon-tech-details');
+            detailsContainer.style.display = 'block';
+            detailsContainer.innerHTML = `<div class="chameleon-spinner-wrapper">${ICONS.spinner} Fetching details...</div>`;
+            const details = await this.getPageTechDetails();
+            let html = `<strong>Title:</strong> ${details.title}<br>`;
+            html += `<strong>URL:</strong> ${details.url}<br>`;
+            html += `<strong>Meta Description:</strong> ${details.metaDescription || 'N/A'}<br>`;
+            html += `<strong>Charset:</strong> ${details.charset || 'N/A'}<br><br>`;
+            html += `<strong>Detected Libraries/Frameworks:</strong><br>`;
+            if (details.techStack.length > 0) {
+                details.techStack.forEach(tech => html += `- ${tech}<br>`);
+            } else {
+                html += `- None detected (or not identifiable via common globals)<br>`;
+            }
+            html += `<br><strong>External Scripts (${details.externalScripts.length}):</strong><br>`;
+            details.externalScripts.slice(0, 5).forEach(script => html += `- ${script.substring(0, 100)}${script.length > 100 ? '...' : ''}<br>`);
+            if (details.externalScripts.length > 5) html += `- ...and ${details.externalScripts.length - 5} more.<br>`;
+
+            html += `<br><strong>External Stylesheets (${details.externalStylesheets.length}):</strong><br>`;
+            details.externalStylesheets.slice(0,5).forEach(style => html += `- ${style.substring(0,100)}${style.length > 100 ? '...' : ''}<br>`);
+            if (details.externalStylesheets.length > 5) html += `- ...and ${details.externalStylesheets.length - 5} more.<br>`;
+
+            detailsContainer.innerHTML = html;
+             this.controller.agent.trackUserActivity('page_tech_details_viewed');
+        }
+
+
+        async getPageTechDetails() {
+            const techStack = [];
+            if (unsafeWindow.jQuery) techStack.push('jQuery');
+            if (unsafeWindow.React || document.querySelector('[data-reactroot], [data-reactid]')) techStack.push('React');
+            if (unsafeWindow.Vue) techStack.push('Vue.js');
+            if (unsafeWindow.angular || document.querySelector('.ng-binding, [ng-app], [data-ng-app]')) techStack.push('AngularJS');
+            if (unsafeWindow.Backbone) techStack.push('Backbone.js');
+            if (unsafeWindow.Ember) techStack.push('Ember.js');
+            if (unsafeWindow.Meteor) techStack.push('Meteor');
+            if (unsafeWindow.Zepto) techStack.push('Zepto.js');
+            if (unsafeWindow.Modernizr) techStack.push('Modernizr');
+            if (unsafeWindow._) techStack.push('Lodash/Underscore'); // Could be either
+
+            const externalScripts = Array.from(document.querySelectorAll('script[src]')).map(s => s.src);
+            const externalStylesheets = Array.from(document.querySelectorAll('link[rel="stylesheet"][href]')).map(l => l.href);
+
+            return {
+                title: document.title,
+                url: window.location.href,
+                metaDescription: document.querySelector('meta[name="description"]')?.content,
+                charset: document.characterSet,
+                techStack,
+                externalScripts,
+                externalStylesheets,
+            };
+        }
+
 
         // Initiates a full page scan and displays results
         async runFullPageScan() {
@@ -1719,17 +1927,49 @@ async function performWebTask(page, actions, report) {
                     </div>
                     <div style="margin-top: 10px;">
                         <details>
+                            <summary style="cursor: pointer; color: var(--chameleon-primary);">Request Headers</summary>
+                            <pre class="chameleon-code-block">${req.requestHeaders ? this.formatHeaders(req.requestHeaders) : 'N/A'}</pre>
+                        </details>
+                        <details style="margin-top: 5px;">
                             <summary style="cursor: pointer; color: var(--chameleon-primary);">Request Body</summary>
-                            <pre class="chameleon-code-block">${req.requestBody ? JSON.stringify(req.requestBody, null, 2) : 'N/A'}</pre>
+                            <pre class="chameleon-code-block">${req.requestBody ? this.formatBody(req.requestBody) : 'N/A'}</pre>
+                        </details>
+                        <details style="margin-top: 5px;">
+                            <summary style="cursor: pointer; color: var(--chameleon-primary);">Response Headers</summary>
+                            <pre class="chameleon-code-block">${req.responseHeaders ? this.formatHeaders(req.responseHeaders) : 'N/A'}</pre>
                         </details>
                         <details style="margin-top: 5px;">
                             <summary style="cursor: pointer; color: var(--chameleon-primary);">Response Body</summary>
-                            <pre class="chameleon-code-block">${req.responseBody ? JSON.stringify(req.responseBody, null, 2) : 'N/A'}</pre>
+                            <pre class="chameleon-code-block">${req.responseBody ? this.formatBody(req.responseBody) : 'N/A'}</pre>
                         </details>
                     </div>
                     <button class="chameleon-button secondary replay-request" data-index="${index}" style="margin-top: 10px; padding: 5px 10px; font-size: 12px;">Replay</button>
                 </div>
             `).join('');
+        }
+
+        formatBody(body) {
+            if (typeof body === 'string') {
+                try {
+                    // Try to parse and pretty print if JSON
+                    return JSON.stringify(JSON.parse(body), null, 2);
+                } catch (e) {
+                    // If not JSON, return as is (or handle other types like XML if needed)
+                    return body;
+                }
+            }
+            // If already an object (likely from parsed JSON)
+            return JSON.stringify(body, null, 2);
+        }
+
+        formatHeaders(headers) {
+            if (typeof headers === 'string') return headers; // GM_xmlhttpRequest might return string
+            if (typeof headers === 'object' && headers !== null) {
+                return Object.entries(headers)
+                    .map(([key, value]) => `${key}: ${value}`)
+                    .join('\n');
+            }
+            return 'N/A';
         }
 
         async replayRequest(index) {
@@ -1742,37 +1982,69 @@ async function performWebTask(page, actions, report) {
             try {
                 const options = {
                     method: req.method,
-                    headers: req.requestHeaders,
-                    data: req.requestBody ? JSON.stringify(req.requestBody) : undefined,
-                    responseType: 'json', // Assume JSON for simplicity
+                    headers: req.requestHeaders || {}, // Ensure headers is an object
+                    data: typeof req.requestBody === 'object' ? JSON.stringify(req.requestBody) : req.requestBody,
+                    responseType: 'text', // Get raw text to handle various content types
                     timeout: 10000,
                     onload: (response) => {
                         this.controller.ui.showNotification(`Replay successful: ${response.status}`, 3000, {type: 'success'});
                         this.controller.log('Replayed request response:', response);
-                        // Optionally add replayed response to log
+
+                        let responseBody = response.responseText;
+                        try { responseBody = JSON.parse(response.responseText); } catch(e){}
+
                         this.addInterceptedRequest({
                             url: req.url,
                             method: req.method,
                             status: response.status,
+                            requestHeaders: req.requestHeaders,
                             requestBody: req.requestBody,
-                            responseBody: response.response,
-                            duration: response.finalUrl ? (Date.now() - req.timestamp) : 0, // Simple duration calc
+                            responseHeaders: this.parseHeaders(response.responseHeaders),
+                            responseBody: responseBody,
+                            duration: (Date.now() - req.timestamp),
                             isReplay: true
                         });
                     },
                     onerror: (error) => {
-                        this.controller.ui.showNotification(`Replay failed: ${error.status}`, 3000, {type: 'danger'});
+                        this.controller.ui.showNotification(`Replay failed. Status: ${error.status}`, 3000, {type: 'danger'});
                         this.controller.error('Replayed request error:', error);
+                         this.addInterceptedRequest({ // Log the failed replay attempt
+                            url: req.url,
+                            method: req.method,
+                            status: error.status || 0,
+                            requestHeaders: req.requestHeaders,
+                            requestBody: req.requestBody,
+                            responseHeaders: error.responseHeaders ? this.parseHeaders(error.responseHeaders) : {},
+                            responseBody: { error: "Replay failed", details: error.responseText || error.error },
+                            duration: (Date.now() - req.timestamp),
+                            isReplay: true,
+                            isError: true
+                        });
                     }
                 };
                 GM_xmlhttpRequest(options);
             } catch (e) {
-                this.controller.error('Error during replay:', e);
-                this.controller.ui.showNotification('Error replaying request.', 3000, {type: 'danger'});
+                this.controller.error('Error during replay setup:', e);
+                this.controller.ui.showNotification('Error setting up replay request.', 3000, {type: 'danger'});
             }
         }
 
+        parseHeaders(headerStr) {
+            if (!headerStr) return {};
+            const headers = {};
+            const lines = headerStr.trim().split(/[\r\n]+/);
+            lines.forEach(line => {
+                const parts = line.split(': ');
+                const header = parts.shift();
+                const value = parts.join(': ');
+                headers[header.toLowerCase()] = value;
+            });
+            return headers;
+        }
+
+
         addInterceptedRequest(requestData) {
+            requestData.timestamp = requestData.timestamp || Date.now(); // Ensure timestamp
             this.interceptedRequests.unshift(requestData); // Add to beginning
             if (this.interceptedRequests.length > 50) { // Keep log size manageable
                 this.interceptedRequests.pop();
@@ -1797,18 +2069,40 @@ async function performWebTask(page, actions, report) {
                     (rule.method === 'ANY' || rule.method === method)
                 );
 
+                // Capture request headers from options or Request object
+                let requestHeaders = {};
+                if (args[0] instanceof Request) {
+                    args[0].headers.forEach((value, key) => { requestHeaders[key] = value; });
+                } else if (options.headers) {
+                    if (options.headers instanceof Headers) {
+                        options.headers.forEach((value, key) => { requestHeaders[key] = value; });
+                    } else {
+                        requestHeaders = { ...options.headers };
+                    }
+                }
+
+
                 if (matchedRule) {
                     self.controller.log(`[API Mock] Intercepted ${method} ${url}, returning mocked response.`);
-                    const responseBody = JSON.parse(matchedRule.response);
+                    const responseBody = JSON.parse(matchedRule.response); // Assuming mock response is always JSON for now
                     const mockResponse = new Response(JSON.stringify(responseBody), {
                         status: matchedRule.status,
-                        headers: { 'Content-Type': 'application/json', 'X-Mocked-By': 'Chameleon-AI-Forge' }
+                        headers: { 'Content-Type': 'application/json', 'X-Mocked-By': 'Chameleon-AI-Forge', ...matchedRule.responseHeaders }
                     });
+                    let parsedRequestBody = null;
+                    try {
+                        parsedRequestBody = options.body ? JSON.parse(options.body) : null;
+                    } catch (e) {
+                        self.controller.log('[API Monitor] Mocked request body is not JSON:', options.body);
+                        parsedRequestBody = options.body;
+                    }
                     self.addInterceptedRequest({
                         url: url,
                         method: method,
                         status: matchedRule.status,
-                        requestBody: options.body ? JSON.parse(options.body) : null,
+                        requestHeaders: requestHeaders,
+                        requestBody: parsedRequestBody,
+                        responseHeaders: self.parseHeaders(mockResponse.headers), // Get headers from mock
                         responseBody: responseBody,
                         duration: Date.now() - startTime,
                         isMocked: true
@@ -1818,27 +2112,43 @@ async function performWebTask(page, actions, report) {
 
                 // Proceed with original fetch if no mock rule matches
                 try {
-                    const response = await self.originalFetch.apply(unsafeWindow, args); // ✅ Correct way
-                    const clonedResponse = response.clone(); // Clone to read body without consuming original
-                    const responseBody = await clonedResponse.json().catch(() => null); // Try to parse as JSON
+                    const response = await self.originalFetch.apply(unsafeWindow, args);
+                    const clonedResponse = response.clone();
+                    const responseBody = await clonedResponse.json().catch(() => clonedResponse.text().catch(() => null));
+
+                    let parsedRequestBody = null;
+                    try {
+                        parsedRequestBody = options.body ? JSON.parse(options.body) : null;
+                    } catch (e) {
+                         self.controller.log('[API Monitor] Original fetch request body is not JSON:', options.body);
+                         parsedRequestBody = options.body;
+                    }
 
                     self.addInterceptedRequest({
                         url: url,
                         method: method,
                         status: response.status,
-                        requestBody: options.body ? JSON.parse(options.body) : null,
+                        requestHeaders: requestHeaders,
+                        requestBody: parsedRequestBody,
+                        responseHeaders: self.parseHeaders(response.headers), // Get headers from actual response
                         responseBody: responseBody,
                         duration: Date.now() - startTime
                     });
                     return response;
                 } catch (error) {
                     self.controller.error(`[API Monitor] Fetch error for ${url}:`, error);
+                     let parsedRequestBody = null;
+                    try {
+                        parsedRequestBody = options.body ? JSON.parse(options.body) : null;
+                    } catch (e) {
+                        parsedRequestBody = options.body;
+                    }
                     self.addInterceptedRequest({
                         url: url,
                         method: method,
                         status: 0, // Indicate network error
-                        requestBody: options.body ? JSON.parse(options.body) : null,
-                        responseBody: { error: error.message },
+                        requestBody: parsedRequestBody,
+                        responseBody: { error: error.message, name: error.name },
                         duration: Date.now() - startTime
                     });
                     throw error;
@@ -1862,14 +2172,16 @@ async function performWebTask(page, actions, report) {
                             try {
                                 responseBody = JSON.parse(this.responseText);
                             } catch (e) {
-                                responseBody = this.responseText; // Not JSON
+                                responseBody = this.responseText;
                             }
 
                             self.addInterceptedRequest({
                                 url: this._requestUrl,
                                 method: this._requestMethod,
                                 status: this.status,
+                                requestHeaders: this._headers, // Add request headers
                                 requestBody: this._requestBody,
+                                responseHeaders: self.parseHeaders(this.getAllResponseHeaders()), // Add response headers
                                 responseBody: responseBody,
                                 duration: duration
                             });
@@ -1881,11 +2193,12 @@ async function performWebTask(page, actions, report) {
                     this._requestMethod = method.toUpperCase();
                     this._requestUrl = url;
                     this._startTime = Date.now();
+                    this._headers = {}; // Reset headers for new request
                     super.open(method, url, ...args);
                 }
 
                 setRequestHeader(header, value) {
-                    this._headers[header] = value;
+                    this._headers[header.toLowerCase()] = value; // Store normalized header
                     super.setRequestHeader(header, value);
                 }
 
@@ -2029,7 +2342,8 @@ async function performWebTask(page, actions, report) {
                     score -= 10;
                 }
             });
-            }
+            // REMOVED DUPLICATE LOOP - The following was a duplicate of the above.
+            // } // This closing brace was also part of the duplication
 
             // Check for external scripts from suspicious domains (simulated)
             const suspiciousDomains = ['bad-tracker.com', 'malicious-cdn.net'];
@@ -2049,6 +2363,26 @@ async function performWebTask(page, actions, report) {
                     score -= 2;
                 }
             });
+
+            // Check for sensitive data patterns in comments or scripts (basic)
+            const sensitiveDataRegex = /(api_key|secret_key|token|password)\s*[:=]\s*['"]?([a-zA-Z0-9-_]{16,})['"]?/gi;
+            document.querySelectorAll('script:not([src])').forEach(script => {
+                let match;
+                while ((match = sensitiveDataRegex.exec(script.textContent)) !== null) {
+                    threats.push({ type: 'potential_sensitive_data_in_script', severity: 'high', element: script, detail: `Pattern: ${match[1]}, Value (preview): ${match[2].substring(0,5)}...` });
+                    score -= 10;
+                }
+            });
+            // Check comments
+            const comments = Array.from(document.evaluate("//comment()", document, null, XPathResult.ANY_TYPE, null));
+            comments.forEach(comment => {
+                let match;
+                while ((match = sensitiveDataRegex.exec(comment.textContent)) !== null) {
+                    threats.push({ type: 'potential_sensitive_data_in_comment', severity: 'medium', element: comment.ownerElement || document.body, detail: `Pattern: ${match[1]}, Value (preview): ${match[2].substring(0,5)}...` });
+                    score -= 5;
+                }
+            });
+
 
             return { threats, score: Math.max(0, score) };
         }
@@ -2113,47 +2447,111 @@ async function performWebTask(page, actions, report) {
          * Scans for basic SQL Injection by probing login forms.
          * @param {Element} [targetForm] - Optional. If provided, only scan this form.
          */
-        async scanSQLInjection(targetForm = null) {
+        async scanSQLInjection(targetElement = null) {
             this.controller.ui.updateStatus('Scanning for SQL Injection...', 'info');
-            this.controller.agent.trackUserActivity('scan_sqli', { target: targetForm ? DOMUtils.getSelector(targetForm) : 'page' });
-            const forms = targetForm ? [targetForm] : Array.from(document.querySelectorAll('form'));
-            const sqliPayload = `' OR 1=1 --`;
-            let found = false;
+            this.controller.agent.trackUserActivity('scan_sqli', { target: targetElement ? DOMUtils.getSelector(targetElement) : 'page' });
 
-            for (const form of forms) {
-                const passwordInput = form.querySelector('input[type="password"]');
-                const usernameInput = form.querySelector('input[type="text"], input[type="email"]');
+            const formsToScan = targetElement ? (targetElement.tagName === 'FORM' ? [targetElement] : (targetElement.form ? [targetElement.form] : [])) : Array.from(document.querySelectorAll('form'));
+            const inputsToScan = targetElement && targetElement.tagName !== 'FORM' ? [targetElement] : Array.from(document.querySelectorAll('input[type="text"], input[type="search"], textarea'));
+
+
+            const sqliPayloads = [
+                `' OR 1=1 --`,
+                `' OR '1'='1`,
+                `" OR 1=1 --`,
+                `" OR "1"="1`,
+                `' OR SLEEP(5)--`, // Time-based, harder to detect client-side but good to include
+                `1 UNION SELECT NULL, @@VERSION --` // Error-based / Union-based
+            ];
+            let foundVulnerabilities = false;
+
+            // Scan forms
+            for (const form of formsToScan) {
+                const inputFields = Array.from(form.querySelectorAll('input[type="text"], input[type="search"], input[type="email"], input[type="password"], textarea'));
                 const submitButton = form.querySelector('button[type="submit"], input[type="submit"]');
 
-                if (passwordInput && usernameInput && submitButton) {
-                    const originalPassword = passwordInput.value;
-                    const originalUsername = usernameInput.value;
+                if (inputFields.length > 0 && submitButton) {
+                    for (const inputField of inputFields) {
+                        const originalValue = inputField.value;
+                        for (const payload of sqliPayloads) {
+                            inputField.value = payload;
+                            this.controller.ui.showNotification(`Probing SQLi on ${DOMUtils.getSelector(inputField)} in form ${DOMUtils.getSelector(form)} with payload: "${payload.substring(0,20)}..."`, 1000, { type: 'info' });
 
-                    passwordInput.value = sqliPayload;
-                    usernameInput.value = 'admin'; // Use a common username
+                            // Temporarily fill other fields to satisfy potential form validation
+                            inputFields.forEach(otherField => {
+                                if (otherField !== inputField && !otherField.value) {
+                                    if (otherField.type === 'email') otherField.value = 'test@example.com';
+                                    else if (otherField.type === 'password') otherField.value = 'testpassword';
+                                    else otherField.value = 'test';
+                                }
+                            });
 
-                    this.controller.ui.showNotification(`Probing form for SQLi: ${DOMUtils.getSelector(form)}`, 1000, {type: 'info'});
-                    submitButton.click();
+                            submitButton.click();
+                            await new Promise(r => setTimeout(r, 2500)); // Wait for page reaction
 
-                    // Wait for potential page reload or API response
-                    await new Promise(r => setTimeout(r, 2000));
+                            const pageText = document.body.textContent.toLowerCase();
+                            if (pageText.includes('login successful') || pageText.includes('welcome') || pageText.includes('dashboard') && !pageText.includes('error')) {
+                                this.addFinding('sqli_login_bypass', 'high', `Potential SQLi (Login Bypass) in form ${DOMUtils.getSelector(form)} with payload "${payload}" in field ${DOMUtils.getSelector(inputField)}.`, form);
+                                foundVulnerabilities = true;
+                            } else if (pageText.includes('sql error') || pageText.includes('database error') || pageText.includes('syntax error') || pageText.includes('mysql') || pageText.includes('ora-')) {
+                                this.addFinding('sqli_error_based', 'medium', `Potential SQLi (Error-based) in form ${DOMUtils.getSelector(form)} with payload "${payload}" in field ${DOMUtils.getSelector(inputField)}.`, form);
+                                foundVulnerabilities = true;
+                            }
+                            // Check if URL changed to an error page (basic check)
+                            if (window.location.href.toLowerCase().includes('error')) {
+                                 this.addFinding('sqli_potential_via_redirect', 'low', `Potential SQLi (Redirect to error page) in form ${DOMUtils.getSelector(form)} with payload "${payload}" in field ${DOMUtils.getSelector(inputField)}.`, form);
+                                 foundVulnerabilities = true;
+                            }
 
-                    // Check for common success/error messages (simulated)
-                    const pageText = document.body.textContent.toLowerCase();
-                    if (pageText.includes('login successful') || pageText.includes('welcome admin') || pageText.includes('dashboard')) {
-                        this.addFinding('basic_sqli_success', 'high', `Potential SQL Injection (Login Bypass) detected in form. Payload: "${sqliPayload}"`, form);
-                        found = true;
-                    } else if (pageText.includes('sql error') || pageText.includes('database error') || pageText.includes('syntax error')) {
-                        this.addFinding('basic_sqli_error', 'medium', `Potential SQL Injection (Error-based) detected in form. Payload: "${sqliPayload}"`, form);
-                        found = true;
+
+                            inputField.value = originalValue; // Restore
+                             // Restore other fields if they were temp filled
+                            inputFields.forEach(otherField => {
+                                if (otherField.dataset.chameleonOriginalValue) {
+                                     otherField.value = otherField.dataset.chameleonOriginalValue;
+                                     delete otherField.dataset.chameleonOriginalValue;
+                                } else if (otherField !== inputField && (otherField.value === 'test@example.com' || otherField.value === 'testpassword' || otherField.value === 'test')) {
+                                    otherField.value = ''; // Clear if it was our test value
+                                }
+                            });
+                            if (foundVulnerabilities) break; // Move to next input field if a payload worked
+                        }
+                        if (foundVulnerabilities && inputFields.length > 1) break; // Move to next form if vulnerability found
                     }
-
-                    passwordInput.value = originalPassword; // Restore
-                    usernameInput.value = originalUsername; // Restore
                 }
             }
-            if (!found) {
-                this.controller.ui.showNotification('No basic SQL Injection vulnerabilities found.', 3000, {type: 'success'});
+
+            // Scan individual input fields not necessarily in a submitted form (e.g., search fields that update via JS)
+            for (const input of inputsToScan) {
+                if (formsToScan.some(f => f.contains(input))) continue; // Already scanned if part of a form
+
+                const originalValue = input.value;
+                for (const payload of sqliPayloads) {
+                    input.value = payload;
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    // Simulate a common action like pressing Enter or a search button if one is nearby
+                    let searchButton = input.nextElementSibling?.matches('button, input[type="button"], input[type="submit"]') ? input.nextElementSibling : null;
+                    if(!searchButton) searchButton = input.parentElement?.querySelector('button, input[type="button"], input[type="submit"]');
+
+                    if(searchButton) searchButton.click();
+                    else input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+
+                    await new Promise(r => setTimeout(r, 1500)); // Wait for JS reaction
+
+                    const pageText = document.body.textContent.toLowerCase();
+                     if (pageText.includes('sql error') || pageText.includes('database error') || pageText.includes('syntax error') || pageText.includes('unclosed quotation mark')) {
+                        this.addFinding('sqli_js_updated_field_error', 'medium', `Potential SQLi (Error-based from JS-updated field) on input ${DOMUtils.getSelector(input)} with payload "${payload}".`, input);
+                        foundVulnerabilities = true;
+                    }
+                    input.value = originalValue; // Restore
+                    if (foundVulnerabilities) break;
+                }
+            }
+
+
+            if (!foundVulnerabilities) {
+                this.controller.ui.showNotification('No obvious SQL Injection vulnerabilities found with basic payloads.', 3000, {type: 'success'});
             }
             this.controller.ui.updateStatus('SQL Injection scan complete.', 'info');
         }
@@ -2554,6 +2952,15 @@ async function performWebTask(page, actions, report) {
 
             // New: Vulnerability Scanner commands
             // "scan this login form for SQL injection"
+            // "select the button that says 'Submit'"
+            const contentSelectionRegex = /(?:select|find|get) (?:the )?(\w+?) (?:that says|with text|whose text is) ['"](.+?)['"]/;
+            const contentSelectionMatch = lowerCmd.match(contentSelectionRegex);
+            if (contentSelectionMatch) {
+                const elementType = contentSelectionMatch[1].trim(); // e.g., button, link, p
+                const textContent = contentSelectionMatch[2].trim();
+                operations.push({ type: 'select_by_content', elementType, textContent });
+            }
+
             const scanElementMatch = lowerCmd.match(/scan (?:this )?(.+?) for (xss|sqli|sql injection)/);
             if (scanElementMatch) {
                 const targetDesc = scanElementMatch[1].trim();
@@ -2660,8 +3067,13 @@ async function performWebTask(page, actions, report) {
                 </div>
                  <div class="chameleon-card">
                     <h4>Data Management</h4>
-                    <button id="setting-clear-cache" class="chameleon-button secondary">${ICONS.security} Clear All Settings & Data</button>
-                    <p class="chameleon-info-text">This will remove all saved preferences, themes, and recorded sessions. Requires page reload.</p>
+                    <button id="setting-clear-cache" class="chameleon-button secondary">${ICONS.security} Clear All Userscript Settings</button>
+                    <p class="chameleon-info-text">This will remove all saved preferences, themes, and other data stored by this userscript. Requires page reload.</p>
+                    <div style="margin-top: 15px;">
+                         <button id="setting-clear-local-storage" class="chameleon-button secondary">${ICONS.tools} Clear Local Storage (Current Site)</button>
+                         <button id="setting-clear-session-storage" class="chameleon-button secondary" style="margin-left:10px;">${ICONS.tools} Clear Session Storage (Current Site)</button>
+                         <p class="chameleon-info-text">These actions affect the current website's storage, not the userscript's settings.</p>
+                    </div>
                 </div>
             `;
             this.bindEvents();
@@ -2686,11 +3098,29 @@ async function performWebTask(page, actions, report) {
                 this.controller.agent.trackUserActivity('setting_changed', { setting: 'foresightMode', value: mode });
             });
             document.getElementById('setting-clear-cache').addEventListener('click', () => {
-                if (confirm('Are you sure you want to clear all Chameleon AI-Forge settings and data? This cannot be undone.')) {
+                if (confirm('Are you sure you want to clear all Chameleon AI-Forge userscript settings and data? This cannot be undone.')) {
                     const keys = GM_listValues();
-                    keys.forEach(key => GM_deleteValue(key));
-                    this.controller.ui.showNotification('All data cleared. Please reload the page to apply changes.', 5000, {type: 'success'});
-                    this.controller.agent.trackUserActivity('data_cleared');
+                    keys.forEach(key => {
+                        if (key.startsWith('chameleon_') || key === 'panelOpen' || key === 'widgetPos' || key === 'panelPos' || key === 'panelSize' || key === 'firstRun' || key === 'autoEnhance' || key === 'foresightMode') {
+                            GM_deleteValue(key);
+                        }
+                    });
+                    this.controller.ui.showNotification('All userscript data cleared. Please reload the page to apply changes.', 5000, {type: 'success'});
+                    this.controller.agent.trackUserActivity('userscript_data_cleared');
+                }
+            });
+            document.getElementById('setting-clear-local-storage').addEventListener('click', () => {
+                if (confirm(`Are you sure you want to clear ALL Local Storage for ${window.location.hostname}? This might log you out or reset site preferences.`)) {
+                    localStorage.clear();
+                    this.controller.ui.showNotification(`Local Storage for ${window.location.hostname} cleared.`, 3000, {type: 'success'});
+                    this.controller.agent.trackUserActivity('local_storage_cleared', { domain: window.location.hostname });
+                }
+            });
+            document.getElementById('setting-clear-session-storage').addEventListener('click', () => {
+                if (confirm(`Are you sure you want to clear ALL Session Storage for ${window.location.hostname}?`)) {
+                    sessionStorage.clear();
+                    this.controller.ui.showNotification(`Session Storage for ${window.location.hostname} cleared.`, 3000, {type: 'success'});
+                    this.controller.agent.trackUserActivity('session_storage_cleared', { domain: window.location.hostname });
                 }
             });
         }
@@ -2709,16 +3139,31 @@ async function performWebTask(page, actions, report) {
                 this.startObserver();
             }
             this.addGlobalActionListeners();
+            this.debouncedHandleMutations = this.debounce(this.handleMutationsDirect, 500);
         }
         // Starts observing DOM mutations
         startObserver() {
             if (this.observer) return; // Already observing
             this.controller.log('Foresight Engine observer started.');
             // Observe childList (add/remove nodes), subtree (all descendants), and specific attributes
-            this.observer = new MutationObserver(this.handleMutations);
+            this.observer = new MutationObserver(this.debouncedHandleMutations); // Use debounced handler
             this.observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['alt', 'aria-label', 'placeholder', 'title', 'href', 'target', 'disabled'] });
             this.controller.ui.updateStatus('Foresight Engine Active.', 'info');
         }
+
+        // Debounce utility
+        debounce(func, wait) {
+            let timeout;
+            return function executedFunction(...args) {
+                const later = () => {
+                    clearTimeout(timeout);
+                    func.apply(this, args);
+                };
+                clearTimeout(timeout);
+                timeout = setTimeout(later, wait);
+            };
+        }
+
         // Stops observing DOM mutations
         stopObserver() {
             if (this.observer) {
@@ -2753,7 +3198,8 @@ async function performWebTask(page, actions, report) {
         }
 
         // Handles observed DOM mutations and sends insights to AgentCore
-        handleMutations = (mutationsList, observer) => {
+        // This is the direct handler, the debounced version will call this.
+        handleMutationsDirect = (mutationsList, observer) => {
             mutationsList.forEach(mutation => {
                 if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                     mutation.addedNodes.forEach(node => {
@@ -2907,10 +3353,26 @@ async function performWebTask(page, actions, report) {
             }
 
             if (data.type === 'image_no_alt') {
-                const message = `${ICONS.bulb} Accessibility: Image without alt text detected.`;
-                const actionText = 'Add Alt Text (Simulated)';
+                let suggestedAlt = 'AI-suggested alt text';
+                // Try to get a better suggestion from filename or surrounding text
+                const src = element.src;
+                if (src) {
+                    const filename = src.substring(src.lastIndexOf('/') + 1).replace(/\.(jpg|jpeg|png|gif|svg|webp)$/i, '').replace(/[-_]/g, ' ');
+                    if (filename && filename.length > 3) { // Avoid using very short/generic filenames
+                        suggestedAlt = filename.charAt(0).toUpperCase() + filename.slice(1); // Capitalize
+                    }
+                }
+                // Rudimentary check for nearby text that might describe the image
+                const parentText = element.parentElement?.textContent?.trim().substring(0, 100);
+                if (parentText && parentText.length > 5 && parentText.length < 80 && !parentText.toLowerCase().includes('image')) { // Avoid generic parent text
+                    suggestedAlt = parentText;
+                }
+
+
+                const message = `${ICONS.bulb} Accessibility: Image without alt text detected. Suggestion: "${suggestedAlt}"`;
+                const actionText = 'Add Alt Text';
                 const actionCallback = () => {
-                    this.executeAgentOperation({ type: 'modify_dom', selector: DOMUtils.getSelector(element), attribute: 'alt', value: 'AI-suggested alt text' });
+                    this.executeAgentOperation({ type: 'modify_dom', selector: DOMUtils.getSelector(element), attribute: 'alt', value: suggestedAlt });
                     element.classList.remove('chameleon-agent-suggested'); // Remove highlight after action
                 };
 
@@ -3229,6 +3691,20 @@ async function performWebTask(page, actions, report) {
                     await this.controller.generateNLPTaskScript(op.nlp_command);
                     return null;
 
+                case 'select_by_content':
+                    const { elementType, textContent } = op;
+                    const allMatchingElements = Array.from(document.querySelectorAll(elementType));
+                    const foundElements = allMatchingElements.filter(el => el.textContent.trim().includes(textContent));
+                    if (foundElements.length === 0) {
+                        throw new Error(`No '${elementType}' elements found with text content "${textContent}".`);
+                    }
+                    this.controller.log(`Agent selected ${foundElements.length} elements by content: "${textContent}"`);
+                    foundElements.forEach(el => {
+                        el.classList.add('chameleon-temp-highlight');
+                        setTimeout(() => el.classList.remove('chameleon-temp-highlight'), 1000);
+                    });
+                    return foundElements;
+
                 // Tier 1: Cross-Tab Orchestration (Simulated)
                 case 'github_mission':
                     this.controller.ui.showNotification('Simulating GitHub mission: Logging in, navigating, creating issue...', 5000, {type: 'info'});
@@ -3392,6 +3868,16 @@ async function performWebTask(page, actions, report) {
                         }
                     }
                 },
+                {
+                    name: 'Toggle Page Content Editable',
+                    icon: ICONS.terminal, // Using terminal icon as a generic "dev tool" icon
+                    action: () => {
+                        const isEditable = document.body.contentEditable === 'true';
+                        document.body.contentEditable = !isEditable;
+                        c.ui.showNotification(`Page content is now ${!isEditable ? 'editable' : 'not editable'}.`, 3000);
+                        c.agent.trackUserActivity('content_editable_toggled', { state: !isEditable });
+                    }
+                },
                 ...Object.entries(NEURAL_THEMES).map(([key, theme]) => ({
                     name: `Apply Theme: ${theme.name}`,
                     icon: ICONS.style,
@@ -3426,27 +3912,53 @@ async function performWebTask(page, actions, report) {
 
             this.elements.overlay.addEventListener('click', (e) => { if (e.target === this.elements.overlay) this.hide(); });
             this.elements.input.addEventListener('input', () => this.filter());
-            this.elements.input.addEventListener('keydown', (e) => {
-                const items = this.elements.results.querySelectorAll('li');
-                if (items.length === 0) return;
-
-                if (e.key === 'Enter') {
-                    e.preventDefault(); // Prevent form submission if any
-                    const activeItem = this.elements.results.querySelector('li.active');
-                    if (activeItem) activeItem.click();
-                } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                    e.preventDefault();
-                    items[this.activeItemIndex]?.classList.remove('active');
-                    if (e.key === 'ArrowDown') {
-                        this.activeItemIndex = (this.activeItemIndex + 1) % items.length;
-                    } else {
-                        this.activeItemIndex = (this.activeItemIndex - 1 + items.length) % items.length;
-                    }
-                    items[this.activeItemIndex].classList.add('active');
-                    items[this.activeItemIndex].scrollIntoView({ block: 'nearest' });
-                }
-            });
+            this.elements.input.addEventListener('keydown', this.handleKeyDown);
+            this.elements.results.addEventListener('mousemove', this.handleMouseMoveOnResults); // For hover effect
         }
+
+        // Centralized method to set the active item
+        setActiveItem(index) {
+            const items = this.elements.results.querySelectorAll('li');
+            if (this.activeItemIndex >= 0 && this.activeItemIndex < items.length) {
+                items[this.activeItemIndex]?.classList.remove('active');
+            }
+            this.activeItemIndex = index;
+            if (this.activeItemIndex >= 0 && this.activeItemIndex < items.length) {
+                items[this.activeItemIndex].classList.add('active');
+                items[this.activeItemIndex].scrollIntoView({ block: 'nearest' });
+            }
+        }
+
+        handleKeyDown = (e) => {
+            const items = this.elements.results.querySelectorAll('li');
+            if (items.length === 0) return;
+
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                if (this.activeItemIndex >= 0 && this.activeItemIndex < items.length) {
+                    items[this.activeItemIndex].click();
+                }
+            } else if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                this.setActiveItem((this.activeItemIndex + 1) % items.length);
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                this.setActiveItem((this.activeItemIndex - 1 + items.length) % items.length);
+            }
+        }
+
+        handleMouseMoveOnResults = (e) => {
+            const targetLi = e.target.closest('li');
+            if (!targetLi || !this.elements.results.contains(targetLi)) return;
+
+            const items = Array.from(this.elements.results.querySelectorAll('li'));
+            const newIndex = items.indexOf(targetLi);
+
+            if (newIndex !== this.activeItemIndex) {
+                this.setActiveItem(newIndex);
+            }
+        }
+
 
         // Toggles the visibility of the command palette
         toggle() {
@@ -3663,15 +4175,19 @@ async function performWebTask(page, actions, report) {
         renderControls(container) {
             container.innerHTML = `
                 <button id="iso-toggle-select" class="chameleon-button">${ICONS.inspect} Toggle Selection Mode</button>
-                <button id="iso-extract" class="chameleon-button secondary" disabled>${ICONS.tools} Extract Selected</button>
-                <div id="iso-selection-info" class="chameleon-info-text">0 components selected.</div>
+                <div style="display: flex; gap: 10px; margin-top: 10px;">
+                    <button id="iso-extract-html" class="chameleon-button secondary" style="flex-grow:1;" disabled>${ICONS.tools} Extract HTML</button>
+                    <button id="iso-extract-styled" class="chameleon-button secondary" style="flex-grow:1;" disabled>${ICONS.style} Extract with Styles</button>
+                </div>
+                <div id="iso-selection-info" class="chameleon-info-text" style="margin-top:10px;">0 components selected.</div>
             `;
             this.bindControls();
         }
         // Binds event listeners for isolation controls
         bindControls() {
             document.getElementById('iso-toggle-select').addEventListener('click', () => this.toggleSelectionMode());
-            document.getElementById('iso-extract').addEventListener('click', () => this.extractComponents());
+            document.getElementById('iso-extract-html').addEventListener('click', () => this.extractComponents(false));
+            document.getElementById('iso-extract-styled').addEventListener('click', () => this.extractComponents(true));
         }
         // Toggles the component selection mode
         toggleSelectionMode() {
@@ -3740,7 +4256,8 @@ async function performWebTask(page, actions, report) {
         updateSelectionInfo() {
             const count = this.selectedComponents.size;
             document.getElementById('iso-selection-info').textContent = `${count} component${count !== 1 ? 's' : ''} selected.`;
-            document.getElementById('iso-extract').disabled = count === 0;
+            document.getElementById('iso-extract-html').disabled = count === 0;
+            document.getElementById('iso-extract-styled').disabled = count === 0;
         }
         // Adds a specific element to the isolation selection, typically from context menu
         isolateElement(element) {
@@ -3757,21 +4274,58 @@ async function performWebTask(page, actions, report) {
             }
             this.controller.agent.trackUserActivity('isolate_element_from_context', { selector: selector });
         }
-        // Extracts the HTML of selected components to clipboard
-        extractComponents() {
+
+        // Extracts the HTML (and optionally styles) of selected components to clipboard
+        extractComponents(includeStyles = false) {
             if (this.selectedComponents.size === 0) {
-                this.controller.ui.showNotification('No components selected to extract.', 2000, {type: 'warning'});
+                this.controller.ui.showNotification('No components selected to extract.', 2000, { type: 'warning' });
                 return;
             }
-            const html = Array.from(this.selectedComponents.values()).map(el => {
+
+            let fullExtraction = '';
+            this.selectedComponents.forEach(el => {
                 const selector = DOMUtils.getSelector(el);
-                return `<!-- Component: ${selector} -->\n${el.outerHTML}`;
-            }).join('\n\n');
-            GM_setClipboard(html);
-            this.controller.ui.showNotification(`Extracted ${this.selectedComponents.size} component(s) to clipboard.`);
+                let componentHtml = `<!-- Component: ${selector} -->\n${el.outerHTML}`;
+                let componentStyles = '';
+
+                if (includeStyles) {
+                    const styles = window.getComputedStyle(el);
+                    let directStyles = "\n<style>\n";
+                    directStyles += `  ${selector} {\n`;
+                    // Extract some key computed styles. This is a simplification.
+                    // A more robust solution would involve parsing stylesheets.
+                    const relevantStyles = ['color', 'background-color', 'font-size', 'font-family', 'padding', 'margin', 'border', 'width', 'height', 'display', 'position', 'top', 'left', 'right', 'bottom'];
+                    relevantStyles.forEach(prop => {
+                        if (styles.getPropertyValue(prop)) {
+                             directStyles += `    ${prop}: ${styles.getPropertyValue(prop)};\n`;
+                        }
+                    });
+                    directStyles += `  }\n`;
+                    // Try to get styles for direct children too (very basic)
+                    Array.from(el.children).forEach(child => {
+                        const childSelector = DOMUtils.getSelector(child);
+                        const childStyles = window.getComputedStyle(child);
+                        directStyles += `  ${childSelector} {\n`;
+                        relevantStyles.forEach(prop => {
+                             if (childStyles.getPropertyValue(prop) && styles.getPropertyValue(prop) !== childStyles.getPropertyValue(prop)) { // Only if different from parent
+                                directStyles += `    ${prop}: ${childStyles.getPropertyValue(prop)};\n`;
+                            }
+                        });
+                        directStyles += `  }\n`;
+                    });
+
+                    directStyles += "</style>\n";
+                    componentStyles = directStyles;
+                }
+                fullExtraction += componentStyles + componentHtml + '\n\n';
+            });
+
+            GM_setClipboard(fullExtraction.trim());
+            this.controller.ui.showNotification(`Extracted ${this.selectedComponents.size} component(s) ${includeStyles ? 'with basic styles' : ''} to clipboard.`);
             this.exitSelectionMode(); // Exit selection mode after extraction
-            this.controller.agent.trackUserActivity('components_extracted', { count: this.selectedComponents.size });
+            this.controller.agent.trackUserActivity('components_extracted', { count: this.selectedComponents.size, styles: includeStyles });
         }
+
 
         /**
          * Simulates remixing an existing component based on a prompt and re-injects it.
@@ -3880,11 +4434,14 @@ async function performWebTask(page, actions, report) {
         startListeners() {
             // Use capture phase to ensure events are caught before they are handled by page scripts
             document.addEventListener('click', this.recordEvent, true);
+            document.addEventListener('click', this.recordEvent, true);
             document.addEventListener('input', this.recordEvent, true);
             document.addEventListener('change', this.recordEvent, true); // For select/checkboxes
             document.addEventListener('submit', this.recordEvent, true); // For form submissions
             document.addEventListener('keydown', this.recordEvent, true); // For key presses
             document.addEventListener('keyup', this.recordEvent, true); // For key releases
+            document.addEventListener('focus', this.recordEvent, true); // Added focus
+            document.addEventListener('blur', this.recordEvent, true);  // Added blur
         }
 
         // Stops listening for user interaction events
@@ -3895,6 +4452,8 @@ async function performWebTask(page, actions, report) {
             document.removeEventListener('submit', this.recordEvent, true);
             document.removeEventListener('keydown', this.recordEvent, true);
             document.removeEventListener('keyup', this.recordEvent, true);
+            document.removeEventListener('focus', this.recordEvent, true); // Added focus
+            document.removeEventListener('blur', this.recordEvent, true);  // Added blur
         }
 
         // Records a user interaction event
@@ -3999,7 +4558,12 @@ async function performWebTask(page, actions, report) {
                         cancelable: true,
                     });
                     el.dispatchEvent(keyboardEvent);
+                } else if (event.type === 'focus') {
+                    el.focus();
+                } else if (event.type === 'blur') {
+                    el.blur();
                 }
+
 
                 await new Promise(resolve => setTimeout(() => {
                     el.classList.remove('chameleon-playback-highlight');
@@ -4064,9 +4628,17 @@ async function performWebTask(page, actions, report) {
                     const modifiersStr = modifiers.length > 0 ? `, { modifiers: [${modifiers.map(m => `'${m}'`).join(', ')}] }` : '';
                     script += `    await page.focus('${escapedSelector}');\n`; // Focus before key event
                     script += `    await page.keyboard.${event.type === 'keydown' ? 'down' : 'up'}('${event.key}'${modifiersStr});\n`;
+                } else if (event.type === 'focus') {
+                    script += `    await page.focus('${escapedSelector}');\n`;
+                } else if (event.type === 'blur') {
+                    // Blur is harder to directly trigger in Puppeteer if it's not a side effect of another action.
+                    // Often, focusing another element or clicking outside implies blur.
+                    // For simplicity, we'll just log it, or one could focus 'body'.
+                    script += `    // Element blurred: ${escapedSelector} (Puppeteer handles blur implicitly or use page.evaluate)\n`;
+                    script += `    // await page.evaluate(() => document.activeElement && document.activeElement.blur()); \n`;
                 }
                 script += `  } catch (e) {\n`;
-                script += `    console.error(\`Error during step on \${e.target ? e.target.tagName : 'unknown element'} with selector '${escapedSelector}': \${e.message}\`);\n`;
+                script += `    console.error(\`Error during step on element with selector '${escapedSelector}': \${e.message}\`);\n`;
                 script += `    // Optionally, you can choose to exit here or continue\n`;
                 script += `    // await browser.close();\n`;
                 script += `    // process.exit(1);\n`;
@@ -4326,8 +4898,9 @@ async function performWebTask(page, actions, report) {
             .chameleon-palette-input-wrapper { display: flex; align-items: center; gap: 12px; padding: 12px; border-bottom: 1px solid var(--border-color); }
             .chameleon-palette-input { background: none; border: none; color: var(--chameleon-text); font-size: 16px; width: 100%; outline: none; }
             .chameleon-palette-results { list-style: none; margin: 0; padding: 8px; max-height: 40vh; overflow-y: auto; }
-            .chameleon-palette-results li { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 6px; cursor: pointer; }
-            .chameleon-palette-results li:hover, .chameleon-palette-results li.active { background: rgba(88, 166, 255, 0.15); color: var(--chameleon-accent); }
+            .chameleon-palette-results li { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 6px; cursor: pointer; transition: background-color 0.1s ease, color 0.1s ease; }
+            /* .chameleon-palette-results li:hover (removed to rely on .active class for hover effect via JS) */
+            .chameleon-palette-results li.active { background: rgba(88, 166, 255, 0.15); color: var(--chameleon-accent); }
             .chameleon-palette-results::-webkit-scrollbar { width: 6px; }
             .chameleon-palette-results::-webkit-scrollbar-track { background: transparent; }
             .chameleon-palette-results::-webkit-scrollbar-thumb { background: var(--chameleon-border); border-radius: 10px; }
