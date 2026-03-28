@@ -194,8 +194,10 @@
             const lmstudio = results[2].status === 'fulfilled' ? results[2].value : [];
 
             const allModels = [...local, ...cloud, ...lmstudio];
-            this.controller.state.availableModels = allModels;
-            GM_setValue('availableModels', allModels);
+            // Fix: remove duplicates by ID
+            const uniqueModels = Array.from(new Map(allModels.map(m => [m.id, m])).values());
+            this.controller.state.availableModels = uniqueModels;
+            GM_setValue('availableModels', uniqueModels);
 
             this.controller.log(`Detection complete. Found ${allModels.length} models total (${local.length} local, ${cloud.length} cloud, ${lmstudio.length} LM Studio).`);
 
@@ -221,7 +223,8 @@
                     return response.models.map(m => ({
                         id: m.name,
                         name: m.name,
-                        source: 'Ollama Local'
+                        source: 'Ollama Local',
+                        endpoint: 'http://localhost:11434/api/chat'
                     }));
                 }
             } catch (e) {
@@ -259,7 +262,8 @@
                         return {
                             id: cloudId,
                             name: `${m.name} (Cloud)`,
-                            source: 'Ollama Cloud'
+                            source: 'Ollama Cloud',
+                            endpoint: 'https://ollama.com/api/chat'
                         };
                     });
                 }
@@ -270,21 +274,14 @@
         }
 
         async detectLMStudio() {
-            // Try both native v1 and OpenAI-compatible endpoints
-            const endpoints = [
-                'http://localhost:1234/api/v1/models',
-                'http://localhost:1234/v1/models'
-            ];
-            // Wait, I should try /v1/models too if /api/v1/models fails
             const tryEndpoints = [
                 'http://localhost:1234/api/v1/models',
-                'http://localhost:1234/v1/models'.replace('/api', ''),
+                'http://localhost:1234/v1/models',
                 'http://127.0.0.1:1234/api/v1/models',
-                'http://127.0.0.1:1234/v1/models'.replace('/api', ''),
+                'http://127.0.0.1:1234/v1/models',
                 'http://localhost:11434/v1/models',
                 'http://127.0.0.1:11434/v1/models'
             ];
-            // Fix: remove potential duplicate in tryEndpoints
             const uniqueEndpoints = [...new Set(tryEndpoints)];
 
             for (const url of uniqueEndpoints) {
@@ -294,10 +291,17 @@
                     if (models && Array.isArray(models)) {
                         this.controller.log(`Model discovery: Detected ${models.length} models via ${url}`);
                         const source = url.includes('11434') ? 'Ollama (OpenAI API)' : 'LM Studio';
+
+                        // Map chat endpoint correctly
+                        let chatEndpoint = '';
+                        if (url.includes('/api/v1/')) chatEndpoint = url.replace('/models', '/chat'); // LM Studio native
+                        else chatEndpoint = url.replace('/models', '/chat/completions'); // OpenAI compatible
+
                         return models.map(m => ({
-                            id: m.key || m.id,
-                            name: m.display_name || m.id,
-                            source: source
+                            id: m.key || m.id || m.name,
+                            name: m.display_name || m.id || m.name,
+                            source: source,
+                            endpoint: chatEndpoint
                         }));
                     }
                 } catch (e) {
@@ -308,9 +312,49 @@
             return [];
         }
 
-        _apiRequest(method, url, headers = {}) {
+        async callModel(prompt, systemPrompt = "You are a helpful AI assistant.") {
+            const activeModel = this.controller.state.selectedModel;
+            if (activeModel === 'default') {
+                throw new Error("Default agent does not support direct model calls. Use simulated commands.");
+            }
+
+            const modelData = this.controller.state.availableModels.find(m => m.id === activeModel);
+            if (!modelData) throw new Error("Selected model not found.");
+
+            let url = '';
+            let headers = { 'Content-Type': 'application/json' };
+            let body = {};
+
+            url = modelData.endpoint;
+            if (modelData.source === 'Ollama Cloud') {
+                headers['Authorization'] = `Bearer ${GM_getValue('ollama_cloud_api_key', '')}`;
+            }
+
+            body = {
+                model: modelData.id,
+                messages: [
+                    { role: 'system', content: systemPrompt },
+                    { role: 'user', content: prompt }
+                ],
+                stream: false
+            };
+
+            const response = await this._apiRequest('POST', url, headers, JSON.stringify(body));
+
+            // Extract content based on API type
+            if (response.message) { // Ollama style
+                return response.message.content;
+            } else if (response.choices && response.choices[0].message) { // OpenAI style
+                return response.choices[0].message.content;
+            }
+
+            return JSON.stringify(response);
+        }
+
+        _apiRequest(method, url, headers = {}, data = null) {
             return new Promise((resolve, reject) => {
                 GM_xmlhttpRequest({
+                    data: data,
                     method: method,
                     url: url,
                     headers: headers,
@@ -1329,8 +1373,18 @@ async function performWebTask(page, actions, report) {
 
         // Applies a selected theme to the page by updating CSS variables and body class
         applyTheme(themeKey, isInitial = false) {
-            const theme = NEURAL_THEMES[themeKey];
+            let theme = NEURAL_THEMES[themeKey];
             if (!theme) {
+                // Fuzzy match for theme names or keys
+                const key = Object.keys(NEURAL_THEMES).find(k =>
+                    k.toLowerCase() === themeKey.toLowerCase() ||
+                    NEURAL_THEMES[k].name.toLowerCase() === themeKey.toLowerCase() ||
+                    themeKey.toLowerCase().includes(k.toLowerCase())
+                );
+                if (key) {
+                    this.applyTheme(key, isInitial);
+                    return;
+                }
                 this.controller.error(`Theme "${themeKey}" not found.`);
                 return;
             }
@@ -1427,17 +1481,42 @@ async function performWebTask(page, actions, report) {
             }
             this.controller.ui.updateStatus('Generating UI component...', 'info');
 
-            // Simulate LLM generation
-            await new Promise(resolve => setTimeout(resolve, 1500 + Math.random() * 1000));
-
+            const activeModel = this.controller.state.selectedModel;
             let generatedHtml = '';
             let generatedCss = '';
             let generatedJs = '';
             let componentName = 'Generated Component';
 
-            if (prompt.toLowerCase().includes('login form')) {
-                componentName = 'Login Form';
-                generatedHtml = `
+            if (activeModel !== 'default') {
+                const systemPrompt = `You are a specialized UI component generator.
+                Based on the user prompt, generate a self-contained HTML component.
+                Return a JSON object with fields: "html" (string), "css" (string), "js" (string), "name" (string).
+                The "html" should use Chameleon CSS classes where possible (chameleon-card, chameleon-button, chameleon-input, etc).
+                Ensure all class names for the component itself start with "${CONFIG.ID_PREFIX}generated-".
+                Respond ONLY with the JSON object.`;
+
+                try {
+                    const aiResponse = await this.controller.modelManager.callModel(prompt, systemPrompt);
+                    const jsonMatch = aiResponse.match(/\{.*\}/s);
+                    if (jsonMatch) {
+                        const parsed = JSON.parse(jsonMatch[0]);
+                        // Fix: handle possible stringified values if LLM messed up
+                        generatedHtml = typeof parsed.html === 'string' ? parsed.html : JSON.stringify(parsed.html);
+                        generatedCss = parsed.css || '';
+                        generatedJs = parsed.js || '';
+                        componentName = parsed.name || 'AI Generated Component';
+                    }
+                } catch (e) {
+                    this.controller.error("AI UI generation failed, falling back:", e);
+                }
+            }
+
+            if (!generatedHtml) {
+                // Fallback to simulated logic
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                if (prompt.toLowerCase().includes('login form')) {
+                    componentName = 'Login Form';
+                    generatedHtml = `
                     <div class="${CONFIG.ID_PREFIX}generated-component chameleon-card" style="max-width: 400px; margin: 20px auto; padding: 20px;">
                         <h4 style="text-align: center; margin-bottom: 20px;">Login</h4>
                         <form class="${CONFIG.ID_PREFIX}generated-form">
@@ -1461,36 +1540,42 @@ async function performWebTask(page, actions, report) {
                         console.log('Generated form submitted:', { email: document.getElementById('gen-email').value });
                     });
                 `;
-            } else if (prompt.toLowerCase().includes('product card')) {
-                componentName = 'Product Card';
-                generatedHtml = `
-                    <div class="${CONFIG.ID_PREFIX}generated-component chameleon-card" style="width: 280px; margin: 20px; display: inline-block; vertical-align: top; text-align: center;">
-                        <img src="https://via.placeholder.com/200x150/58a6ff/ffffff?text=Product" alt="Product Image" style="max-width: 100%; border-radius: 4px; margin-bottom: 15px;">
-                        <h4 style="font-size: 18px; margin-bottom: 10px;">Awesome Gadget Pro</h4>
-                        <p style="font-size: 22px; font-weight: bold; color: var(--chameleon-primary); margin-bottom: 15px;">$99.99</p>
-                        <button class="chameleon-button" style="width: 90%;">Add to Cart</button>
-                    </div>
-                `;
-                generatedJs = `
-                    document.querySelector('.${CONFIG.ID_PREFIX}generated-component button').addEventListener('click', function() {
-                        alert('Added Awesome Gadget Pro to cart!');
-                        console.log('Product added to cart.');
-                    });
-                `;
-            } else {
-                componentName = 'Generic Component';
-                generatedHtml = `
-                    <div class="${CONFIG.ID_PREFIX}generated-component chameleon-card" style="margin: 20px auto; padding: 20px; text-align: center;">
-                        <h4>AI Generated Content</h4>
-                        <p>This is a dynamically generated component based on your prompt: "${prompt}".</p>
-                        <button class="chameleon-button secondary">Action</button>
-                    </div>
-                `;
+                } else if (prompt.toLowerCase().includes('product card')) {
+                    componentName = 'Product Card';
+                    generatedHtml = `
+                        <div class="${CONFIG.ID_PREFIX}generated-component chameleon-card" style="width: 280px; margin: 20px; display: inline-block; vertical-align: top; text-align: center;">
+                            <img src="https://via.placeholder.com/200x150/58a6ff/ffffff?text=Product" alt="Product Image" style="max-width: 100%; border-radius: 4px; margin-bottom: 15px;">
+                            <h4 style="font-size: 18px; margin-bottom: 10px;">Awesome Gadget Pro</h4>
+                            <p style="font-size: 22px; font-weight: bold; color: var(--chameleon-primary); margin-bottom: 15px;">$99.99</p>
+                            <button class="chameleon-button" style="width: 90%;">Add to Cart</button>
+                        </div>
+                    `;
+                    generatedJs = `
+                        document.querySelector('.${CONFIG.ID_PREFIX}generated-component button').addEventListener('click', function() {
+                            alert('Added Awesome Gadget Pro to cart!');
+                            console.log('Product added to cart.');
+                        });
+                    `;
+                } else {
+                    componentName = 'Generic Component';
+                    generatedHtml = `
+                        <div class="${CONFIG.ID_PREFIX}generated-component chameleon-card" style="margin: 20px auto; padding: 20px; text-align: center;">
+                            <h4>AI Generated Content</h4>
+                            <p>This is a dynamically generated component based on your prompt: "${prompt}".</p>
+                            <button class="chameleon-button secondary">Action</button>
+                        </div>
+                    `;
+                }
             }
 
             const wrapper = document.createElement('div');
             wrapper.className = `${CONFIG.ID_PREFIX}generated-wrapper`;
-            wrapper.innerHTML = generatedHtml;
+            // Ensure the main element has the class if missing
+            if (!generatedHtml.includes(`${CONFIG.ID_PREFIX}generated-component`)) {
+                wrapper.innerHTML = `<div class="${CONFIG.ID_PREFIX}generated-component">${generatedHtml}</div>`;
+            } else {
+                wrapper.innerHTML = generatedHtml;
+            }
 
             document.body.appendChild(wrapper);
 
@@ -1502,7 +1587,15 @@ async function performWebTask(page, actions, report) {
             // Inject JS for the generated component (if any)
             if (generatedJs) {
                 const scriptEl = document.createElement('script');
-                scriptEl.textContent = generatedJs;
+                scriptEl.textContent = `
+                    (function() {
+                        try {
+                            ${generatedJs}
+                        } catch (e) {
+                            console.error('Error in generated UI script:', e);
+                        }
+                    })();
+                `;
                 scriptEl.id = `${CONFIG.ID_PREFIX}generated-script-${Date.now()}`;
                 document.body.appendChild(scriptEl);
                 // Mark for potential cleanup
@@ -1510,7 +1603,7 @@ async function performWebTask(page, actions, report) {
             }
 
             // Add a removable overlay to the generated component
-            const generatedEl = wrapper.querySelector(`.${CONFIG.ID_PREFIX}generated-component`);
+            const generatedEl = wrapper.querySelector(`.${CONFIG.ID_PREFIX}generated-component`) || wrapper.firstElementChild;
             if (generatedEl) {
                 DOMUtils.createRemovableOverlay(generatedEl, () => {
                     wrapper.remove(); // Remove the wrapper which contains the component
@@ -1843,6 +1936,12 @@ async function performWebTask(page, actions, report) {
         addMockRule(rule) {
             this.mockRules.push(rule);
             this.updateMockRulesList();
+        }
+
+        addMonitorRule(rule) {
+            // Logic to highlight/log specific URLs could go here.
+            // For now, we just log that we are watching them.
+            this.controller.log(`API Monitor: Now watching for requests matching ${rule.urlRegex}`);
         }
 
         removeMockRule(index) {
@@ -2504,10 +2603,42 @@ async function performWebTask(page, actions, report) {
             const lastMessageBubble = document.querySelector(`#${CONFIG.ID_PREFIX}genesis-conversation .chameleon-message.ai:last-child .chameleon-bubble`);
 
             try {
-                // Simulate AI processing time
-                await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 1500));
+                let operations = [];
 
-                const operations = this.parseCommand(command);
+                if (activeModel !== 'default') {
+                    // Actual model call for intent parsing
+                    const systemPrompt = `You are the intent parser for Genesis Command Center.
+                    Convert the user's natural language command into a JSON array of operations.
+                    Available operation types:
+                    - { "type": "theme", "theme": "neural_dark" | "cyberpunk" | etc }
+                    - { "type": "select", "selector": "css-selector" }
+                    - { "type": "style", "style": { "color": "red", "fontSize": "20px" } }
+                    - { "type": "animate", "animation": "pulse" | "glow" | "shake" }
+                    - { "type": "generate_ui", "prompt": "description" }
+                    - { "type": "modify_dom", "selector": "...", "attribute": "...", "value": "...", "textContent": "..." }
+                    - { "type": "inject_html", "selector": "...", "position": "beforeend", "html": "..." }
+                    - { "type": "scan" }
+                    - { "type": "summarize" }
+                    - { "type": "navigate_current_tab", "url": "..." }
+
+                    Respond ONLY with the JSON array.`;
+
+                    try {
+                        const aiResponse = await this.controller.modelManager.callModel(command, systemPrompt);
+                        const jsonMatch = aiResponse.match(/\[.*\]/s);
+                        if (jsonMatch) {
+                            operations = JSON.parse(jsonMatch[0]);
+                        }
+                    } catch (e) {
+                        this.controller.error("AI parsing failed, falling back to rule-based:", e);
+                        operations = this.parseCommand(command);
+                    }
+                } else {
+                    // Simulate AI processing time
+                    await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 1500));
+                    operations = this.parseCommand(command);
+                }
+
                 if (operations.length === 0) {
                     lastMessageBubble.innerHTML = "I'm not sure how to do that yet. Could you rephrase?";
                     return;
@@ -2526,7 +2657,7 @@ async function performWebTask(page, actions, report) {
                         successfulOperations++;
                     } catch (opError) {
                         this.controller.error(`Operation failed: ${op.type}`, opError);
-                        lastMessageBubble.innerHTML = `An operation failed: ${opError.message}. I'll try to continue.`;
+                        this.addMessage(`Operation "${op.type}" failed: ${opError.message}`, 'ai');
                         // Don't break, try next operation
                     }
                 }
@@ -2586,14 +2717,7 @@ async function performWebTask(page, actions, report) {
             const findRegex = /(?:find|select|get) (?:all )?(.+?)(?: that are| with| and|$)/;
             const findMatch = lowerCmd.match(findRegex);
             if (findMatch) {
-                let selector = findMatch[1].trim().replace(/ tags?/g, '');
-                // Simple mapping for common elements
-                if (selector.includes('button')) selector = 'button';
-                else if (selector.includes('link')) selector = 'a';
-                else if (selector.includes('image')) selector = 'img';
-                else if (selector.includes('input')) selector = 'input';
-                else if (selector.includes('paragraph')) selector = 'p';
-                else if (selector.includes('heading')) selector = 'h1, h2, h3, h4, h5, h6';
+                let selector = this.resolveSelector(findMatch[1].trim().replace(/ tags?/g, ''));
                 operations.push({ type: 'select', selector: selector });
             }
 
@@ -2642,10 +2766,13 @@ async function performWebTask(page, actions, report) {
                 let value = '';
                 let textContent = '';
 
-                if (targetDesc.includes('links')) selector = 'a';
-                else if (targetDesc.includes('submit button')) selector = 'button[type="submit"], input[type="submit"]';
-                else if (targetDesc.includes('first h1')) selector = 'h1:first-of-type';
-                else if (targetDesc.includes('this element')) selector = this.context.lastSelectedElements && this.context.lastSelectedElements.length > 0 ? DOMUtils.getSelector(this.context.lastSelectedElements[0]) : '';
+                if (targetDesc.includes('this element')) {
+                    selector = (this.context.lastSelectedElements && this.context.lastSelectedElements.length > 0) ? DOMUtils.getSelector(this.context.lastSelectedElements[0]) : '';
+                } else if (targetDesc.includes('submit button')) {
+                    selector = 'button[type="submit"], input[type="submit"]';
+                } else {
+                    selector = this.resolveSelector(targetDesc);
+                }
 
                 if (actionDesc.includes('open in new tabs')) { attribute = 'target'; value = '_blank'; }
                 else if (actionDesc.includes('disabled')) { attribute = 'disabled'; value = 'true'; }
@@ -2666,7 +2793,7 @@ async function performWebTask(page, actions, report) {
             const injectHtmlMatch = lowerCmd.match(injectHtmlRegex);
             if (injectHtmlMatch) {
                 const componentDesc = injectHtmlMatch[1].trim();
-                const targetSelector = injectHtmlMatch[2].trim();
+                const targetSelector = this.resolveSelector(injectHtmlMatch[2].trim());
                 const position = injectHtmlMatch[3] ? injectHtmlMatch[3].trim() : 'beforeend'; // default position
 
                 let htmlContent = '';
@@ -2694,9 +2821,11 @@ async function performWebTask(page, actions, report) {
                 let script = '';
                 let event = '';
 
-                if (targetDesc.includes('form')) selector = 'form';
-                else if (targetDesc.includes('button')) selector = 'button';
-                else if (targetDesc.includes('this element')) selector = this.context.lastSelectedElements && this.context.lastSelectedElements.length > 0 ? DOMUtils.getSelector(this.context.lastSelectedElements[0]) : '';
+                if (targetDesc.includes('this element')) {
+                    selector = this.context.lastSelectedElements && this.context.lastSelectedElements.length > 0 ? DOMUtils.getSelector(this.context.lastSelectedElements[0]) : '';
+                } else {
+                    selector = this.resolveSelector(targetDesc);
+                }
 
                 if (actionDesc.includes('submitting')) { script = 'e.preventDefault();'; event = 'submit'; }
                 else if (actionDesc.includes('clicking')) { script = 'e.preventDefault();'; event = 'click'; }
@@ -2725,9 +2854,13 @@ async function performWebTask(page, actions, report) {
                 const targetDesc = scanElementMatch[1].trim();
                 const scanType = scanElementMatch[2].trim().replace('sql injection', 'sqli');
                 let selector = '';
-                if (targetDesc.includes('login form')) selector = 'form:has(input[type="password"])';
-                else if (targetDesc.includes('input field')) selector = 'input[type="text"], textarea';
-                else if (targetDesc.includes('this element')) selector = this.context.lastSelectedElements && this.context.lastSelectedElements.length > 0 ? DOMUtils.getSelector(this.context.lastSelectedElements[0]) : '';
+                if (targetDesc.includes('this element')) {
+                    selector = this.context.lastSelectedElements && this.context.lastSelectedElements.length > 0 ? DOMUtils.getSelector(this.context.lastSelectedElements[0]) : '';
+                } else if (targetDesc.includes('login form')) {
+                    selector = 'form:has(input[type="password"])';
+                } else {
+                    selector = this.resolveSelector(targetDesc);
+                }
 
                 if (selector) {
                     operations.push({ type: 'scan_element', selector, scan_type: scanType });
@@ -2741,10 +2874,11 @@ async function performWebTask(page, actions, report) {
                 const targetDesc = recreateComponentMatch[1].trim();
                 const newTitle = recreateComponentMatch[2].trim();
                 let selector = '';
-                if (targetDesc.includes('header')) selector = 'header';
-                else if (targetDesc.includes('footer')) selector = 'footer';
-                else if (targetDesc.includes('main content')) selector = 'main';
-                else if (targetDesc.includes('this element')) selector = this.context.lastSelectedElements && this.context.lastSelectedElements.length > 0 ? DOMUtils.getSelector(this.context.lastSelectedElements[0]) : '';
+                if (targetDesc.includes('this element')) {
+                    selector = this.context.lastSelectedElements && this.context.lastSelectedElements.length > 0 ? DOMUtils.getSelector(this.context.lastSelectedElements[0]) : '';
+                } else {
+                    selector = this.resolveSelector(targetDesc);
+                }
 
                 if (selector) {
                     operations.push({ type: 'recreate_component', selector, new_content_prompt: `a ${targetDesc} with title "${newTitle}"` });
@@ -2785,6 +2919,22 @@ async function performWebTask(page, actions, report) {
 
 
             return operations;
+        }
+
+        // Helper to resolve descriptive names to CSS selectors
+        resolveSelector(desc) {
+            const lower = desc.toLowerCase();
+            if (lower.includes('button')) return 'button';
+            if (lower.includes('link') || lower.includes('anchor')) return 'a';
+            if (lower.includes('image') || lower.includes('picture')) return 'img';
+            if (lower.includes('input') || lower.includes('textbox')) return 'input, textarea';
+            if (lower.includes('paragraph')) return 'p';
+            if (lower.includes('heading')) return 'h1, h2, h3, h4, h5, h6';
+            if (lower.includes('main') || lower.includes('content')) return 'main, #content, .content, article';
+            if (lower.includes('header')) return 'header, #header, .header';
+            if (lower.includes('footer')) return 'footer, #footer, .footer';
+            if (lower.includes('body')) return 'body';
+            return desc; // Fallback to raw string
         }
 
         // Simple keyword extraction for summarization simulation
@@ -3316,10 +3466,23 @@ async function performWebTask(page, actions, report) {
                     await this.controller.analyzer.runFullPageScan();
                     return null;
                 case 'summarize':
-                    const textContent = document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 2000);
+                    const textContent = document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 5000);
                     const title = document.title || 'this page';
-                    const keywords = this.controller.genesis.extractKeywords(textContent);
-                    this.controller.genesis.addMessage(`Based on the visible content, "${title}" appears to be about: ${keywords.join(', ')}. A full, nuanced summary would require a connection to a true LLM.`, 'ai');
+                    const activeModel = this.controller.state.selectedModel;
+
+                    if (activeModel !== 'default') {
+                        try {
+                            const summary = await this.controller.modelManager.callModel(`Summarize the following text from the page "${title}":\n\n${textContent}`);
+                            this.controller.genesis.addMessage(summary, 'ai');
+                        } catch (e) {
+                            this.controller.error("AI summarization failed:", e);
+                            const keywords = this.controller.genesis.extractKeywords(textContent);
+                            this.controller.genesis.addMessage(`(Fallback) "${title}" is about: ${keywords.join(', ')}. AI error: ${e.message}`, 'ai');
+                        }
+                    } else {
+                        const keywords = this.controller.genesis.extractKeywords(textContent);
+                        this.controller.genesis.addMessage(`Based on the visible content, "${title}" appears to be about: ${keywords.join(', ')}. A full summary requires an active AI model (Ollama/LMStudio).`, 'ai');
+                    }
                     return null;
                 case 'theme':
                     this.controller.styler.applyTheme(op.theme);
@@ -3992,21 +4155,40 @@ async function performWebTask(page, actions, report) {
             this.controller.ui.updateStatus('Remixing component...', 'info');
             this.controller.agent.trackUserActivity('remix_component', { selector: DOMUtils.getSelector(originalElement), prompt: newContentPrompt });
 
-            // Simulate LLM generation for new content
-            await new Promise(resolve => setTimeout(resolve, 1500 + Math.random() * 1000));
-
+            const activeModel = this.controller.state.selectedModel;
             let newHtml = '';
-            // Very basic simulation: replace content based on prompt
-            if (newContentPrompt.includes('title')) {
-                const titleMatch = newContentPrompt.match(/title "(.+?)"/);
-                const newTitle = titleMatch ? titleMatch[1] : 'Remixed Title';
-                newHtml = originalElement.outerHTML.replace(/<h[1-6].*?>.*?<\/h[1-6]>/i, `<h2 style="color: var(--chameleon-primary);">${newTitle}</h2>`);
-            } else {
-                newHtml = `<div class="${CONFIG.ID_PREFIX}remixed-content chameleon-card" style="padding: 20px; border: 2px dashed var(--chameleon-accent); margin: 10px 0;">
-                    <h4>Remixed Component (AI Generated)</h4>
-                    <p>This component was remixed based on your prompt: "${newContentPrompt}".</p>
-                    <button class="chameleon-button secondary">New Action</button>
-                </div>`;
+
+            if (activeModel !== 'default') {
+                const systemPrompt = `You are a UI component remixer.
+                Given the existing HTML of a component and a user's instruction for modification, provide the updated HTML.
+                Existing HTML: ${originalElement.outerHTML}
+                Respond ONLY with the new HTML code.`;
+
+                try {
+                    const aiResponse = await this.controller.modelManager.callModel(newContentPrompt, systemPrompt);
+                    const htmlMatch = aiResponse.match(/<[a-z].*>.*<\/[a-z].*>/is) || [aiResponse];
+                    newHtml = htmlMatch[0];
+                } catch (e) {
+                    this.controller.error("AI remixing failed, falling back:", e);
+                }
+            }
+
+            if (!newHtml) {
+                // Simulate LLM generation for new content
+                await new Promise(resolve => setTimeout(resolve, 1000));
+
+                // Very basic simulation: replace content based on prompt
+                if (newContentPrompt.includes('title')) {
+                    const titleMatch = newContentPrompt.match(/title "(.+?)"/);
+                    const newTitle = titleMatch ? titleMatch[1] : 'Remixed Title';
+                    newHtml = originalElement.outerHTML.replace(/<h[1-6].*?>.*?<\/h[1-6]>/i, `<h2 style="color: var(--chameleon-primary);">${newTitle}</h2>`);
+                } else {
+                    newHtml = `<div class="${CONFIG.ID_PREFIX}remixed-content chameleon-card" style="padding: 20px; border: 2px dashed var(--chameleon-accent); margin: 10px 0;">
+                        <h4>Remixed Component (AI Generated)</h4>
+                        <p>This component was remixed based on your prompt: "${newContentPrompt}".</p>
+                        <button class="chameleon-button secondary">New Action</button>
+                    </div>`;
+                }
             }
 
             const tempContainer = document.createElement('div');
