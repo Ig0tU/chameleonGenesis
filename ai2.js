@@ -173,6 +173,126 @@
         }
     }
 
+    // --- MODEL MANAGEMENT ---
+    class ModelManager {
+        constructor(controller) {
+            this.controller = controller;
+        }
+
+        async detectAll() {
+            this.controller.ui.updateStatus('Detecting AI models...', 'info');
+            const [local, cloud, lmstudio] = await Promise.all([
+                this.detectOllamaLocal(),
+                this.detectOllamaCloud(),
+                this.detectLMStudio()
+            ]);
+
+            const allModels = [...local, ...cloud, ...lmstudio];
+            this.controller.state.availableModels = allModels;
+
+            const message = `Detected ${allModels.length} models (${local.length} Ollama, ${cloud.length} Ollama Cloud, ${lmstudio.length} LM Studio).`;
+            this.controller.ui.showNotification(message, 5000, { type: 'success' });
+            this.controller.ui.updateStatus('Model detection complete.', 'success', 3000);
+
+            // Re-render settings if active to show new models
+            if (this.controller.state.activeTab === 'settings') {
+                this.controller.settings.render();
+            }
+
+            return allModels;
+        }
+
+        async detectOllamaLocal() {
+            try {
+                const response = await this._apiRequest('GET', 'http://localhost:11434/api/tags');
+                if (response && response.models) {
+                    return response.models.map(m => ({
+                        id: m.name,
+                        name: m.name,
+                        source: 'Ollama Local'
+                    }));
+                }
+            } catch (e) {
+                this.controller.log('Ollama Local not detected or error:', e.message);
+            }
+            return [];
+        }
+
+        async detectOllamaCloud() {
+            const apiKey = GM_getValue('ollama_cloud_api_key', '');
+            if (!apiKey) return [];
+
+            try {
+                const response = await this._apiRequest('GET', 'https://ollama.com/api/tags', {
+                    'Authorization': `Bearer ${apiKey}`
+                });
+                if (response && response.models) {
+                    return response.models.map(m => {
+                        let cloudId = m.name;
+                        const paramSize = m.details?.parameter_size;
+
+                        if (paramSize) {
+                            const num = parseFloat(paramSize);
+                            cloudId = `${m.model.split(':')[0]}:${num}b-cloud`;
+                        } else if (cloudId.includes(':')) {
+                            cloudId = `${cloudId}-cloud`;
+                        } else {
+                            cloudId = `${cloudId}:cloud`;
+                        }
+
+                        return {
+                            id: cloudId,
+                            name: `${m.name} (Cloud)`,
+                            source: 'Ollama Cloud'
+                        };
+                    });
+                }
+            } catch (e) {
+                this.controller.log('Ollama Cloud error:', e.message);
+            }
+            return [];
+        }
+
+        async detectLMStudio() {
+            try {
+                const response = await this._apiRequest('GET', 'http://localhost:1234/api/v1/models');
+                if (response && response.models) {
+                    return response.models.map(m => ({
+                        id: m.key || m.id,
+                        name: m.display_name || m.id,
+                        source: 'LM Studio'
+                    }));
+                }
+            } catch (e) {
+                this.controller.log('LM Studio not detected or error:', e.message);
+            }
+            return [];
+        }
+
+        _apiRequest(method, url, headers = {}) {
+            return new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: method,
+                    url: url,
+                    headers: headers,
+                    onload: (res) => {
+                        if (res.status >= 200 && res.status < 300) {
+                            try {
+                                resolve(JSON.parse(res.responseText));
+                            } catch (e) {
+                                reject(new Error('Invalid JSON response'));
+                            }
+                        } else {
+                            reject(new Error(`HTTP ${res.status}`));
+                        }
+                    },
+                    onerror: (err) => reject(err),
+                    timeout: 5000
+                });
+            });
+        }
+    }
+
     // --- MAIN CONTROLLER ---
     class ChameleonAIForge {
         constructor() {
@@ -185,11 +305,14 @@
                 sessionId: `CHA-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
                 featuresPaused: false, // For tab visibility/performance
                 registeredTools: [], // For Plugin API
+                availableModels: [], // Detected AI models
+                selectedModel: GM_getValue('selectedModel', 'default'),
             };
 
             // Core Systems
             this.ui = new UIManager(this);
             this.settings = new SettingsManager(this);
+            this.modelManager = new ModelManager(this);
 
             // Functional Modules
             this.styler = new NeuralStyleEngine(this);
@@ -2333,7 +2456,9 @@ async function performWebTask(page, actions, report) {
 
         // Processes a natural language command using the AgentCore
         async processCommand(command) {
-            this.addMessage(`<span class="chameleon-spinner-wrapper">${ICONS.spinner} Thinking...</span>`, 'ai');
+            const activeModel = this.controller.state.selectedModel;
+            const modelLabel = activeModel !== 'default' ? `[${activeModel}] ` : '';
+            this.addMessage(`<span class="chameleon-spinner-wrapper">${ICONS.spinner} ${modelLabel}Thinking...</span>`, 'ai');
             const lastMessageBubble = document.querySelector(`#${CONFIG.ID_PREFIX}genesis-conversation .chameleon-message.ai:last-child .chameleon-bubble`);
 
             try {
@@ -2643,6 +2768,26 @@ async function performWebTask(page, actions, report) {
                 <h3>Settings</h3>
                 <p>Configure the behavior of the Genesis Command Center.</p>
                 <div class="chameleon-card">
+                    <h4>AI Model Configuration</h4>
+                    <div class="chameleon-form-group">
+                        <label for="ollama-cloud-api-key">Ollama Cloud API Key</label>
+                        <input type="password" id="ollama-cloud-api-key" class="chameleon-input" value="${GM_getValue('ollama_cloud_api_key', '')}" placeholder="Paste your API key here">
+                    </div>
+                    <button id="detect-models-btn" class="chameleon-button">${ICONS.execute} Auto-Detect Models</button>
+
+                    <div class="chameleon-form-group" style="margin-top: 16px;">
+                        <label for="chameleon-active-model">Active Model</label>
+                        <select id="chameleon-active-model" class="chameleon-select">
+                            <option value="default" ${this.controller.state.selectedModel === 'default' ? 'selected' : ''}>Default Agent</option>
+                            ${this.controller.state.availableModels.map(m =>
+                                `<option value="${m.id}" ${this.controller.state.selectedModel === m.id ? 'selected' : ''}>${m.name} (${m.source})</option>`
+                            ).join('')}
+                        </select>
+                    </div>
+                    <p class="chameleon-info-text">Select which model Genesis should use for processing commands.</p>
+                </div>
+
+                <div class="chameleon-card">
                     <h4>Foresight Engine</h4>
                     <div class="chameleon-setting-item">
                         <label for="setting-auto-enhance">Enable Proactive Enhancement</label>
@@ -2667,6 +2812,30 @@ async function performWebTask(page, actions, report) {
         }
         // Binds event listeners for settings controls
         bindEvents() {
+            const apiKeyInput = document.getElementById('ollama-cloud-api-key');
+            if (apiKeyInput) {
+                apiKeyInput.addEventListener('change', (e) => {
+                    GM_setValue('ollama_cloud_api_key', e.target.value);
+                    this.controller.ui.showNotification('API Key saved.', 2000);
+                });
+            }
+
+            const detectBtn = document.getElementById('detect-models-btn');
+            if (detectBtn) {
+                detectBtn.addEventListener('click', () => {
+                    this.controller.modelManager.detectAll();
+                });
+            }
+
+            const activeModelSelect = document.getElementById('chameleon-active-model');
+            if (activeModelSelect) {
+                activeModelSelect.addEventListener('change', (e) => {
+                    this.controller.state.selectedModel = e.target.value;
+                    GM_setValue('selectedModel', e.target.value);
+                    this.controller.ui.showNotification(`Active model set to: ${e.target.value}`, 2000);
+                });
+            }
+
             document.getElementById('setting-auto-enhance').addEventListener('change', (e) => {
                 const isEnabled = e.target.checked;
                 GM_setValue('autoEnhance', isEnabled);
