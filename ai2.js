@@ -179,24 +179,35 @@
             this.controller = controller;
         }
 
-        async detectAll() {
-            this.controller.ui.updateStatus('Detecting AI models...', 'info');
-            const [local, cloud, lmstudio] = await Promise.all([
+        async detectAll(silent = false) {
+            if (!silent) this.controller.ui.updateStatus('Detecting AI models...', 'info');
+            this.controller.log('Starting AI model auto-detection...');
+
+            const results = await Promise.allSettled([
                 this.detectOllamaLocal(),
                 this.detectOllamaCloud(),
                 this.detectLMStudio()
             ]);
 
+            const local = results[0].status === 'fulfilled' ? results[0].value : [];
+            const cloud = results[1].status === 'fulfilled' ? results[1].value : [];
+            const lmstudio = results[2].status === 'fulfilled' ? results[2].value : [];
+
             const allModels = [...local, ...cloud, ...lmstudio];
             this.controller.state.availableModels = allModels;
+            GM_setValue('availableModels', allModels);
 
-            const message = `Detected ${allModels.length} models (${local.length} Ollama, ${cloud.length} Ollama Cloud, ${lmstudio.length} LM Studio).`;
-            this.controller.ui.showNotification(message, 5000, { type: 'success' });
-            this.controller.ui.updateStatus('Model detection complete.', 'success', 3000);
+            this.controller.log(`Detection complete. Found ${allModels.length} models total (${local.length} local, ${cloud.length} cloud, ${lmstudio.length} LM Studio).`);
 
-            // Re-render settings if active to show new models
-            if (this.controller.state.activeTab === 'settings') {
-                this.controller.settings.render();
+            if (!silent) {
+                const message = `Detected ${allModels.length} models (${local.length} Ollama, ${cloud.length} Ollama Cloud, ${lmstudio.length} LM Studio).`;
+                this.controller.ui.showNotification(message, 5000, { type: 'success' });
+                this.controller.ui.updateStatus('Model detection complete.', 'success', 3000);
+
+                // Re-render settings if active to show new models
+                if (this.controller.state.activeTab === 'settings') {
+                    this.controller.settings.render();
+                }
             }
 
             return allModels;
@@ -206,6 +217,7 @@
             try {
                 const response = await this._apiRequest('GET', 'http://localhost:11434/api/tags');
                 if (response && response.models) {
+                    this.controller.log(`Ollama Local: Detected ${response.models.length} models.`);
                     return response.models.map(m => ({
                         id: m.name,
                         name: m.name,
@@ -213,20 +225,24 @@
                     }));
                 }
             } catch (e) {
-                this.controller.log('Ollama Local not detected or error:', e.message);
+                this.controller.log('Ollama Local not detected:', e.message);
             }
             return [];
         }
 
         async detectOllamaCloud() {
             const apiKey = GM_getValue('ollama_cloud_api_key', '');
-            if (!apiKey) return [];
+            if (!apiKey) {
+                this.controller.log('Ollama Cloud: No API Key configured, skipping.');
+                return [];
+            }
 
             try {
                 const response = await this._apiRequest('GET', 'https://ollama.com/api/tags', {
                     'Authorization': `Bearer ${apiKey}`
                 });
                 if (response && response.models) {
+                    this.controller.log(`Ollama Cloud: Detected ${response.models.length} models.`);
                     return response.models.map(m => {
                         let cloudId = m.name;
                         const paramSize = m.details?.parameter_size;
@@ -254,18 +270,41 @@
         }
 
         async detectLMStudio() {
-            try {
-                const response = await this._apiRequest('GET', 'http://localhost:1234/api/v1/models');
-                if (response && response.models) {
-                    return response.models.map(m => ({
-                        id: m.key || m.id,
-                        name: m.display_name || m.id,
-                        source: 'LM Studio'
-                    }));
+            // Try both native v1 and OpenAI-compatible endpoints
+            const endpoints = [
+                'http://localhost:1234/api/v1/models',
+                'http://localhost:1234/v1/models'
+            ];
+            // Wait, I should try /v1/models too if /api/v1/models fails
+            const tryEndpoints = [
+                'http://localhost:1234/api/v1/models',
+                'http://localhost:1234/v1/models'.replace('/api', ''),
+                'http://127.0.0.1:1234/api/v1/models',
+                'http://127.0.0.1:1234/v1/models'.replace('/api', ''),
+                'http://localhost:11434/v1/models',
+                'http://127.0.0.1:11434/v1/models'
+            ];
+            // Fix: remove potential duplicate in tryEndpoints
+            const uniqueEndpoints = [...new Set(tryEndpoints)];
+
+            for (const url of uniqueEndpoints) {
+                try {
+                    const response = await this._apiRequest('GET', url);
+                    const models = response.models || response.data;
+                    if (models && Array.isArray(models)) {
+                        this.controller.log(`Model discovery: Detected ${models.length} models via ${url}`);
+                        const source = url.includes('11434') ? 'Ollama (OpenAI API)' : 'LM Studio';
+                        return models.map(m => ({
+                            id: m.key || m.id,
+                            name: m.display_name || m.id,
+                            source: source
+                        }));
+                    }
+                } catch (e) {
+                    // Continue to next endpoint
                 }
-            } catch (e) {
-                this.controller.log('LM Studio not detected or error:', e.message);
             }
+            this.controller.log('LM Studio not detected at expected endpoints.');
             return [];
         }
 
@@ -305,7 +344,7 @@
                 sessionId: `CHA-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
                 featuresPaused: false, // For tab visibility/performance
                 registeredTools: [], // For Plugin API
-                availableModels: [], // Detected AI models
+                availableModels: GM_getValue('availableModels', []), // Detected AI models
                 selectedModel: GM_getValue('selectedModel', 'default'),
             };
 
@@ -376,6 +415,9 @@
 
             this.state.isInitialized = true;
             this.log('Genesis Command Center Initialized.');
+
+            // Trigger auto-detection of models on start
+            this.modelManager.detectAll(true);
 
             // Register Greasemonkey menu commands for easy access
             GM_registerMenuCommand('Toggle Chameleon Command Center', () => this.ui.togglePanel());
@@ -2812,53 +2854,53 @@ async function performWebTask(page, actions, report) {
         }
         // Binds event listeners for settings controls
         bindEvents() {
-            const apiKeyInput = document.getElementById('ollama-cloud-api-key');
-            if (apiKeyInput) {
-                apiKeyInput.addEventListener('change', (e) => {
-                    GM_setValue('ollama_cloud_api_key', e.target.value);
+            const container = document.getElementById(`${CONFIG.ID_PREFIX}tab-settings`);
+            if (!container) return;
+
+            // Use event delegation to prevent listener stacking on re-render
+            if (this._eventsBound) return;
+            this._eventsBound = true;
+
+            container.addEventListener('change', (e) => {
+                const target = e.target;
+                if (target.id === 'ollama-cloud-api-key') {
+                    GM_setValue('ollama_cloud_api_key', target.value);
                     this.controller.ui.showNotification('API Key saved.', 2000);
-                });
-            }
-
-            const detectBtn = document.getElementById('detect-models-btn');
-            if (detectBtn) {
-                detectBtn.addEventListener('click', () => {
-                    this.controller.modelManager.detectAll();
-                });
-            }
-
-            const activeModelSelect = document.getElementById('chameleon-active-model');
-            if (activeModelSelect) {
-                activeModelSelect.addEventListener('change', (e) => {
-                    this.controller.state.selectedModel = e.target.value;
-                    GM_setValue('selectedModel', e.target.value);
-                    this.controller.ui.showNotification(`Active model set to: ${e.target.value}`, 2000);
-                });
-            }
-
-            document.getElementById('setting-auto-enhance').addEventListener('change', (e) => {
-                const isEnabled = e.target.checked;
-                GM_setValue('autoEnhance', isEnabled);
-                this.controller.ui.showNotification(`Auto Enhancement ${isEnabled ? 'Enabled' : 'Disabled'}.`, 3000, { type: isEnabled ? 'success' : 'warning' });
-                if (isEnabled) {
-                    this.controller.foresight.startObserver();
-                } else {
-                    this.controller.foresight.stopObserver();
+                } else if (target.id === 'chameleon-active-model') {
+                    this.controller.state.selectedModel = target.value;
+                    GM_setValue('selectedModel', target.value);
+                    this.controller.ui.showNotification(`Active model set to: ${target.value}`, 2000);
+                } else if (target.id === 'setting-auto-enhance') {
+                    const isEnabled = target.checked;
+                    GM_setValue('autoEnhance', isEnabled);
+                    this.controller.ui.showNotification(`Auto Enhancement ${isEnabled ? 'Enabled' : 'Disabled'}.`, 3000, { type: isEnabled ? 'success' : 'warning' });
+                    if (isEnabled) {
+                        this.controller.foresight.startObserver();
+                    } else {
+                        this.controller.foresight.stopObserver();
+                    }
+                    this.controller.agent.trackUserActivity('setting_changed', { setting: 'autoEnhance', value: isEnabled });
+                } else if (target.id === 'setting-foresight-mode') {
+                    const mode = target.value;
+                    GM_setValue('foresightMode', mode);
+                    this.controller.ui.showNotification(`Foresight Mode set to "${mode}".`, 3000, { type: 'info' });
+                    this.controller.agent.trackUserActivity('setting_changed', { setting: 'foresightMode', value: mode });
                 }
-                this.controller.agent.trackUserActivity('setting_changed', { setting: 'autoEnhance', value: isEnabled });
             });
-            document.getElementById('setting-foresight-mode').addEventListener('change', (e) => {
-                const mode = e.target.value;
-                GM_setValue('foresightMode', mode);
-                this.controller.ui.showNotification(`Foresight Mode set to "${mode}".`, 3000, { type: 'info' });
-                this.controller.agent.trackUserActivity('setting_changed', { setting: 'foresightMode', value: mode });
-            });
-            document.getElementById('setting-clear-cache').addEventListener('click', () => {
-                if (confirm('Are you sure you want to clear all Chameleon AI-Forge settings and data? This cannot be undone.')) {
-                    const keys = GM_listValues();
-                    keys.forEach(key => GM_deleteValue(key));
-                    this.controller.ui.showNotification('All data cleared. Please reload the page to apply changes.', 5000, {type: 'success'});
-                    this.controller.agent.trackUserActivity('data_cleared');
+
+            container.addEventListener('click', (e) => {
+                const target = e.target.closest('button');
+                if (!target) return;
+
+                if (target.id === 'detect-models-btn') {
+                    this.controller.modelManager.detectAll();
+                } else if (target.id === 'setting-clear-cache') {
+                    if (confirm('Are you sure you want to clear all Chameleon AI-Forge settings and data? This cannot be undone.')) {
+                        const keys = GM_listValues();
+                        keys.forEach(key => GM_deleteValue(key));
+                        this.controller.ui.showNotification('All data cleared. Please reload the page to apply changes.', 5000, {type: 'success'});
+                        this.controller.agent.trackUserActivity('data_cleared');
+                    }
                 }
             });
         }
