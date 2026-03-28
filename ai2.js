@@ -2029,7 +2029,6 @@ async function performWebTask(page, actions, report) {
                     score -= 10;
                 }
             });
-            }
 
             // Check for external scripts from suspicious domains (simulated)
             const suspiciousDomains = ['bad-tracker.com', 'malicious-cdn.net'];
